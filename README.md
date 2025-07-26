@@ -2,7 +2,7 @@
 
 翻譯一覽：
 
-- [ ] （9~20, 12p）Chapter 1：Operating system interfaces
+- [x] （9~20, 12p）Chapter 1：Operating system interfaces
 - [ ] （21~30, 10p）Chapter 2：Operating system organization
 - [ ] （31~42, 12p）Chapter 3：Page tables
 - [ ] （53~58, 6p）Chapter 5：Interrupts and device drivers
