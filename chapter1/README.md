@@ -232,13 +232,13 @@ xv6 的 shell 會用類似上述程式碼的方式來實作像 `grep fork sh.c |
 管道在表面上看起來與暫存檔案並無太大差別，這段管線程式
 
 ```sh
-echo hello world | wc  
+echo hello world | wc
 ```
 
 也可以改用暫存檔來實作，不用管道：
 
 ```sh
-echo hello world >/tmp/xyz; wc </tmp/xyz  
+echo hello world >/tmp/xyz; wc </tmp/xyz
 ```
 
 但在這種情況下，管道相較於暫存檔至少有三項優勢：
@@ -246,3 +246,82 @@ echo hello world >/tmp/xyz; wc </tmp/xyz
 - 第一，管道會自動清除自身； 使用檔案重導時，執行完後 shell 必須另外小心地移除 `/tmp/xyz`
 - 第二，管道能傳遞任意長度的資料流，而檔案重導方式則需要硬碟上有足夠空間來儲存全部資料
 - 第三，管道允許管線中的各階段並行執行，而使用檔案的做法則要求第一個程式必須先結束，第二個才能開始
+
+## 1.4 File system
+
+xv6 的檔案系統提供了兩個東西：資料檔案（data files），其內容是未經詮釋的位元組陣列； 以及目錄（directories），其內容是指向資料檔案與其他目錄的具名參考（reference）。 目錄之間會形成一棵樹狀結構，從一個特別的目錄開始，稱為 root（根目錄）。 像 `/a/b/c` 這樣的路徑，表示在根目錄 `/` 底下的 `a` 目錄中的 `b` 目錄中的 `c` 檔案或目錄。 如果路徑不是以 `/` 開頭，則會根據呼叫該程式的行程「當下的目前目錄（current directory）」來解析； 這個目前目錄可以透過 `chdir` 系統呼叫來變更
+
+以下兩段程式碼會開啟同一個檔案（假設中間所有目錄皆已存在）：
+
+```c
+chdir("/a");
+chdir("b");
+open("c", O_RDONLY);
+
+open("/a/b/c", O_RDONLY);
+```
+
+第一段程式會將目前目錄改為 `/a/b`； 第二段則完全不會去變動目前目錄的位置
+
+xv6 提供了一些系統呼叫來建立新的檔案與目錄：
+
+- `mkdir` 用來建立新的目錄
+- 在呼叫 `open` 時加上 `O_CREATE` 標誌，則會建立新的資料檔案
+- `mknod` 則用來建立新的裝置檔案
+
+下面這個範例示範了三者的使用方式：
+
+```c
+mkdir("/dir");
+fd = open("/dir/file", O_CREATE|O_WRONLY);
+close(fd);
+mknod("/console", 1, 1);
+```
+
+`mknod` 會建立一個特殊檔案，該檔案代表一個裝置。 與裝置檔案相關聯的是主裝置號與次裝置號（即 `mknod` 的兩個參數），其能用來唯一識別一個核心中的裝置。 之後行程開啟該裝置檔案時，核心會將 `read` 和 `write` 系統呼叫轉向裝置驅動程式的實作，而不是交由檔案系統處理
+
+一個檔案的名稱與該檔案本身是分開的； 同一個底層檔案（稱為 inode）可以對應到多個名稱，這些名稱被稱為「連結（link）」。 每個連結都是一個目錄項目，該項目包含一個檔案名稱以及對一個 inode 的參考。 inode 存放的是關於該檔案的中繼資料（metadata），包括檔案類型（檔案、目錄或裝置）、檔案長度、檔案在磁碟上的內容位置，以及該檔案被多少個連結所參考
+
+`fstat` 系統呼叫會從檔案描述符所對應的 inode 中取得資訊。 它會填入一個 `struct stat` 結構，該結構在 `stat.h`（[kernel/stat.h](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/stat.h)）中的定義如下：
+
+```c
+#define T_DIR     1   // Directory
+#define T_FILE    2   // File
+#define T_DEVICE  3   // Device
+
+struct stat {
+  int dev;     // File system's disk device
+  uint ino;    // Inode number
+  short type;  // Type of file
+  short nlink; // Number of links to file
+  uint64 size; // Size of file in bytes
+};
+```
+
+`link` 系統呼叫可以建立另一個檔名，使其指向與現有檔案相同的 inode。 以下這段程式碼會建立一個同時名為 `a` 與 `b` 的檔案：
+
+```c
+open("a", O_CREATE|O_WRONLY);
+link("a", "b");
+```
+
+此時讀寫 `a` 就等同於讀寫 `b`。 每個 inode 都有唯一的 inode 編號。 在執行完上面這段程式碼後，我們可以透過 `fstat` 得知 `a` 和 `b` 是否指向同一個內容，若是，則它們會回傳相同的 inode 編號（`ino`），且其 `nlink` 會是 2
+
+`unlink` 系統呼叫會從檔案系統中移除一個檔名。 只有當檔案的連結數為零，且沒有任何檔案描述符指向它時，inode 與其磁碟上的內容才會被釋放。 因此在前段程式碼中加入：
+
+```c
+unlink("a");
+```
+
+會讓該檔案的 inode 與內容仍可透過 `b` 存取。 此外：
+
+```c
+fd = open("/tmp/xyz", O_CREATE|O_RDWR);
+unlink("/tmp/xyz");
+```
+
+是一種慣用的方式，用來建立一個沒有名稱的暫時 inode，當程式關閉 `fd` 或終止時，該 inode 就會被自動清除
+
+Unix 提供許多可從 shell 呼叫的檔案操作工具，這些工具是使用者層級的程式，例如 `mkdir`、`ln` 與 `rm`。 這樣的設計讓任何人都能透過新增使用者層級的程式來擴充命令列介面。 現在回頭看，這個設計似乎理所當然，但當時的其他系統常常是把這些命令內建在 shell 裡，甚至將 shell 內建在核心之中
+
+有一個例外是 `cd`，它是內建在 shell 裡的。 由於 `cd` 必須改變 shell 本身的目前工作目錄，如果 `cd` 是以一般命令執行的，則 shell 會需要建立一個子行程，子行程執行 `cd`，而 `cd` 只會改變子行程的工作目錄。 父行程（也就是 shell）的目前目錄將不會受到影響
