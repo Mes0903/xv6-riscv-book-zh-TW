@@ -2,4 +2,12 @@
 
 翻譯一覽：
 
-- Chapter 1：Operating system interfaces
+- [ ] （9~20, 12p）Chapter 1：Operating system interfaces
+- [ ] （21~30, 10p）Chapter 2：Operating system organization
+- [ ] （31~42, 12p）Chapter 3：Page tables
+- [ ] （53~58, 6p）Chapter 5：Interrupts and device drivers
+- [ ] （59~70, 12p）Chapter 6：Locking
+- [ ] （71~84, 14p）Chapter 7：Scheduling
+- [ ] （85~102, 18p）Chapter 8：File system
+- [ ] （103~106, 4p）Chapter 9：Concurrency revisited
+- [ ] （107~109, 3p）Chapter 10：Summary
