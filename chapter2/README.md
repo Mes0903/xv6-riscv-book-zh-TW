@@ -33,3 +33,33 @@ CPU 提供了實現強隔離的硬體支援。 例如，RISC-V 擁有三種 CPU 
 在 supervisor mode 中，CPU 可以執行特權指令，例如啟用或關閉中斷、讀取與寫入頁表位址所儲存的暫存器等等。 如果某個處於 user mode 的應用程式試圖執行特權指令，CPU 不會執行該指令，而是會切換至 supervisor mode，讓 supervisor-mode 的程式碼能夠終止該應用程式，因為它做了不該做的事情。 第一章中的圖 1.1 說明了這種架構，應用程式只能執行 user-mode 的指令（例如加法等），稱為在 user space（使用者空間）中執行； 而 supervisor mode 的軟體則還能執行特權指令，稱為在 kernel space（核心空間）中執行。 執行於 kernel space（或 supervisor mode）的軟體被稱為核心（kernel）
 
 應用程式無法直接呼叫核心函式，若其想要呼叫某個核心功能（例如 xv6 中的 `read` 系統呼叫），則必須轉移至核心。 CPU 提供了一條特殊的指令，用來將 CPU 從 user mode 切換到 supervisor mode，並從由核心指定的進入點進入核心（RISC-V 提供的 `ecall` 指令就是為此目的而設計的）。 一旦 CPU 切換到 supervisor mode，核心便能驗證該系統呼叫的參數（例如檢查傳入的記憶體位址是否屬於應用程式的範圍），決定應用程式是否有權執行該操作（例如檢查應用程式是否有權寫入指定檔案），然後決定是要拒絕還是執行該請求。 由核心控制切換到 supervisor mode 的進入點是非常重要的，如果應用程式能夠自行決定核心的進入點，惡意應用就可能從繞過參數驗證的位置進入核心
+
+## 2.3 Kernel organization
+
+一個關鍵的設計問題是：作業系統的哪些部分應該在 supervisor mode（監督者模式）下執行。 其中一種可能的做法是讓整個作業系統都駐留在核心中，這樣所有系統呼叫的實作都會在 supervisor mode 下執行，這種架構被稱為單體核心（monolithic kernel）
+
+在這種架構中，整個作業系統是由一個在擁有完整硬體特權下執行的單一程式所構成。 這樣的設計相對方便，因為作業系統設計者不需要判斷作業系統中哪些部分不需要完整的硬體權限。 此外，作業系統的不同組件之間也會更容易合作，例如作業系統可能有一個緩衝區快取（buffer cache），可供檔案系統與虛擬記憶體系統共用
+
+單體架構的缺點是：作業系統中不同部分的互動通常很複雜（如本書後續會提到），因此作業系統開發者很容易犯錯。 在單體核心中，錯誤通常是致命的，因為在 supervisor mode 發生錯誤往往會導致整個核心崩潰。 若核心失效，整台電腦就會停止運作，所有應用程式也都會失效，此時就必須重新啟動電腦
+
+為了降低核心錯誤所帶來的風險，作業系統設計者可以儘量減少在 supervisor mode 下執行的作業系統程式碼，並將大部分作業系統的功能放在 user mode 執行，這種核心架構被稱為微核心（microkernel）
+
+圖 2.1 說明了微核心的設計，在該圖中，檔案系統是一個以 user-level 執行的行程。 以行程形式執行的作業系統服務被稱為伺服器（servers）。 為了讓應用程式能夠與檔案伺服器互動，核心提供了一種「行程間通訊（inter-process communication）」機制，使得一個 user-mode 行程可以向另一個行程發送訊息。 例如，若像 shell 這樣的應用程式想讀寫一個檔案，它會傳送一個訊息給檔案伺服器並等待回覆
+
+![（Figure 2.1: A microkernel with a file-system server）](image/mkernel.png)
+
+在微核心架構中，核心介面只包含一些低層次的功能，例如啟動應用程式、傳送訊息、存取裝置硬體等。 這樣的設計使得核心本身能夠保持相對簡單，因為大部分的作業系統功能都由 user-level 的伺服器來負責
+
+在現實世界中，單體核心與微核心這兩種架構都很流行。 許多 Unix 核心採用單體架構，例如 Linux 就是一個單體核心，但其中也有些作業系統功能是以 user-level 伺服器執行的（例如視窗系統）。 Linux 能為作業系統密集型的應用提供高效能環境，有部分就是因為核心子系統之間可以高度整合
+
+像 Minix、L4 以及 QNX 等作業系統採用了微核心加伺服器的架構，並且在嵌入式環境中被廣泛使用。 L4 的一個變種「seL4」甚至小到足以被形式化驗證其記憶體安全性與其他安全特性<sup>[[1]](#1)</sup>。 作業系統開發者之間對於哪種架構較佳有許多爭論，目前也沒有哪一種架構優於另一種的明確證據。 此外，這也很取決於「較佳」的定義是什麼：更高的效能、更小的程式碼體積、更可靠的核心、更可靠的整體作業系統（包含使用者層服務）等等
+
+實務上還有一些考量可能比架構選擇更重要。 有些作業系統採用微核心，但會將部分原本屬於 user-level 的服務放到 kernel space 中執行，以提高效能。 有些作業系統之所以維持單體核心，是因為它們最初就是這樣設計的，而將現有系統重寫成純微核心設計所需的代價太高，相較之下新增功能可能更值得投入
+
+從本書的觀點來看，微核心與單體核心作業系統共享許多核心概念：它們實作系統呼叫、使用頁表、處理中斷、支援行程、使用鎖來控制並發、實作檔案系統等等。 本書將聚焦於這些核心概念
+
+xv6 是以單體核心的方式實作的，與大多數 Unix 作業系統相同。 因此，xv6 的核心介面即對應作業系統的介面，且該核心實作了完整的作業系統。 雖然 xv6 並未提供太多服務，其核心的規模甚至比某些微核心還小，但在概念上，xv6 屬於單體核心
+
+## Bibliography
+
+- <a id="1">[1]</a>：Gerwin Klein, Kevin Elphinstone, Gernot Heiser, June Andronick, David Cock, Philip Derrin, Dhammika Elkaduwe, Kai Engelhardt, Rafal Kolanski, Michael Norrish, Thomas Sewell, Harvey Tuch, and Simon Winwood. Sel4: Formal verification of an OS kernel. In Proceedings of the ACM SIGOPS 22nd Symposium on Operating Systems Principles, page 207–220, 2009.
