@@ -126,6 +126,28 @@ xv6 的核心為每個行程維護許多狀態，這些狀態集中存放在 `st
 
 總結來說，行程結合了兩個設計概念：位址空間，讓行程產生擁有獨立記憶體的錯覺； 以及執行緒，讓行程感覺擁有自己的 CPU。 在 xv6 中，一個行程包含一個位址空間與一個執行緒。 而在實際的作業系統中，一個行程可能會包含多個執行緒，以善用多核心 CPU 的計算資源
 
+## 2.6 Code: starting xv6, the first process and system call
+
+為了讓 xv6 更具體易懂，我們將簡要地說明核心如何啟動並執行第一個行程。 後續的章節將會更詳細地介紹本概要中提到的機制。 當 RISC-V 電腦開機時，它會先進行初始化，接著執行儲存在唯讀記憶體中的啟動載入器（boot loader）。 這個 boot loader 將 xv6 核心載入到記憶體中。 然後，在 machine mode 下，CPU 會從 `_entry` 開始執行 xv6。 此時 RISC-V 的分頁硬體尚未啟用，因此虛擬位址會直接對應到實體位址
+
+boot loader 會將 xv6 核心載入至記憶體中的實體位址 `0x80000000`。 之所以不是放在 `0x0`，是因為從 `0x0` 到 `0x80000000` 的位址範圍被保留給了 I/O 裝置使用
+
+`_entry` 處的指令會建立一個堆疊，讓 xv6 能夠執行 C 程式碼。 xv6 在 `start.c`（[kernel/start.c:11](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/start.c#L11)）中宣告了一個初始堆疊區域 `stack0`。 `_entry` 的程式碼將堆疊指標（`sp`）設為 `stack0 + 4096`，即堆疊頂端，因為在 RISC-V 中堆疊是向下成長的。 現在核心已有堆疊，`_entry` 接著呼叫位於 `start`（[kernel/start.c:15](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/start.c#L15)）的 C 函式
+
+`start` 函式會進行一些只能在 machine mode 下執行的設定，然後切換到 supervisor mode。 為了進入 supervisor mode，RISC-V 提供了 `mret` 指令，這個指令通常用來從一個 supervisor mode 對 machine mode 的呼叫中返回。 然而 `start` 並非是從這類呼叫返回的，不過它會模擬那種情境：它會在 `mstatus` 暫存器中設定前一個權限模式為 supervisor，將 `main` 的位址寫入 `mepc` 暫存器中作為返回位址，將 `satp` 設為 0 以停用 supervisor mode 下的虛擬位址轉譯，並將所有中斷與例外的處理委託給 supervisor mode
+
+::: tip  
+`mret` 通常用來從 machine mode「回去」到 supervisor mode，也就是說前面會有個 supervisor mode 進到 machine mode 的呼叫／過程。 但 xv6 中開機過渡到 supervisor mode 的前面並沒有「S 進到 M 的過程」，只是利用它來進到 supervisor mode 而已  
+:::
+
+在進入 supervisor mode 之前，`start` 還要做一件事：設定時鐘晶片，使其產生定時中斷。 這些前置作業完成後，`start` 便會透過呼叫 `mret`「返回」到 supervisor 模式。 這會讓程式計數器跳躍到 `main`，也就是先前寫入 `mepc` 的位址
+
+當 `main` 初始化完若干裝置與子系統後，會透過呼叫 `userinit` 建立第一個行程。 這個第一個行程會執行一段以 RISC-V 組合語言撰寫的小程式，並發出 xv6 中的第一個系統呼叫。 `initcode.S` 會將 `exec` 系統呼叫的編號 `SYS_EXEC` 載入暫存器 `a7`，然後執行 `ecall` 指令以重新進入核心
+
+核心會在 `syscall` 中使用暫存器 `a7` 內的數值來呼叫對應的系統呼叫。 系統呼叫表會將 `SYS_EXEC` 映射到函式 `sys_exec`，接著核心會呼叫該函式。 正如我們在 UNIX 章節中所看到的，`exec` 會用新的程式（這裡是 `/init`）取代目前行程的記憶體與暫存器內容
+
+一旦核心執行完 `exec`，它會返回到 `/init` 行程的使用者空間。 `init` 會在需要時建立一個新的主控台裝置檔案，然後將其分別以檔案描述符 0、1 和 2 打開。 接著，它會在主控台上啟動一個 shell，此時，系統便已啟動完成
+
 ## Bibliography
 
 - <a id="1">[1]</a>：Gerwin Klein, Kevin Elphinstone, Gernot Heiser, June Andronick, David Cock, Philip Derrin, Dhammika Elkaduwe, Kai Engelhardt, Rafal Kolanski, Michael Norrish, Thomas Sewell, Harvey Tuch, and Simon Winwood. Sel4: Formal verification of an OS kernel. In Proceedings of the ACM SIGOPS 22nd Symposium on Operating Systems Principles, page 207–220, 2009.
