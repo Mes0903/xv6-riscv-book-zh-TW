@@ -60,6 +60,46 @@ CPU 提供了實現強隔離的硬體支援。 例如，RISC-V 擁有三種 CPU 
 
 xv6 是以單體核心的方式實作的，與大多數 Unix 作業系統相同。 因此，xv6 的核心介面即對應作業系統的介面，且該核心實作了完整的作業系統。 雖然 xv6 並未提供太多服務，其核心的規模甚至比某些微核心還小，但在概念上，xv6 屬於單體核心
 
+## 2.4 Code: xv6 organization
+
+xv6 的核心原始碼位於 `kernel/` 子目錄中。 這些原始碼按照一種粗略的模組化概念分為多個檔案，下方的表格列出了這些檔案。 各模組間的介面定義在 `defs.h`（[kernel/defs.h](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/defs.h)）中
+
+<span class = "center-column">
+
+| File             | Description                                              |
+|------------------|----------------------------------------------------------|
+| bio.c            | Disk block cache for the file system.                   |
+| console.c        | Connect to the user keyboard and screen.                |
+| entry.S          | Very first boot instructions.                           |
+| exec.c           | exec() system call.                                     |
+| file.c           | File descriptor support.                                |
+| fs.c             | File system.                                            |
+| kalloc.c         | Physical page allocator.                                |
+| kernelvec.S      | Handle traps from kernel.                               |
+| log.c            | File system logging and crash recovery.                 |
+| main.c           | Control initialization of other modules during boot.    |
+| pipe.c           | Pipes.                                                  |
+| plic.c           | RISC-V interrupt controller.                            |
+| printf.c         | Formatted output to the console.                        |
+| proc.c           | Processes and scheduling.                               |
+| sleeplock.c      | Locks that yield the CPU.                               |
+| spinlock.c       | Locks that don't yield the CPU.                         |
+| start.c          | Early machine-mode boot code.                           |
+| string.c         | C string and byte-array library.                        |
+| swtch.S          | Thread switching.                                       |
+| syscall.c        | Dispatch system calls to handling function.             |
+| sysfile.c        | File-related system calls.                              |
+| sysproc.c        | Process-related system calls.                           |
+| trampoline.S     | Assembly code to switch between user and kernel.        |
+| trap.c           | C code to handle and return from traps and interrupts.  |
+| uart.c           | Serial-port console device driver.                      |
+| virtio_disk.c    | Disk device driver.                                     |
+| vm.c             | Manage page tables and address spaces.                  |
+
+（Figure 2.2: Xv6 kernel source files.）
+
+</span>
+
 ## Bibliography
 
 - <a id="1">[1]</a>：Gerwin Klein, Kevin Elphinstone, Gernot Heiser, June Andronick, David Cock, Philip Derrin, Dhammika Elkaduwe, Kai Engelhardt, Rafal Kolanski, Michael Norrish, Thomas Sewell, Harvey Tuch, and Simon Winwood. Sel4: Formal verification of an OS kernel. In Proceedings of the ACM SIGOPS 22nd Symposium on Operating Systems Principles, page 207–220, 2009.
