@@ -160,6 +160,14 @@ boot loader 會將 xv6 核心載入至記憶體中的實體位址 `0x80000000`�
 
 最後，使用者與核心程式碼之間的界線有時並不那麼清楚：某些具有特權的使用者層行程可能會提供重要服務，因此其實際上也會成為作業系統的一部分； 而在某些作業系統中，特權使用者程式甚至可以將新的程式碼插入核心（例如 Linux 的可載入核心模組機制）
 
+## 2.8 Real world
+
+大多數作業系統都採用了行程的概念，而大多數行程的樣貌也與 xv6 的類似。 然而，現代作業系統會支援一個行程內有多個執行緒，以便讓單一行程能利用多顆 CPU。 在一個行程內支援多執行緒需要相當多的機制，而 xv6 並不具備這些，這通常也包括一些介面的變動（例如 Linux 的 `clone`，它是 `fork` 的一種變體），用以控制執行緒之間共享行程的哪些部分
+
+## 2.9 Exercises
+
+1. 為 xv6 新增一個系統呼叫，回傳目前可用的記憶體總量
+
 ## Bibliography
 
 - <a id="1">[1]</a>：Gerwin Klein, Kevin Elphinstone, Gernot Heiser, June Andronick, David Cock, Philip Derrin, Dhammika Elkaduwe, Kai Engelhardt, Rafal Kolanski, Michael Norrish, Thomas Sewell, Harvey Tuch, and Simon Winwood. Sel4: Formal verification of an OS kernel. In Proceedings of the ACM SIGOPS 22nd Symposium on Operating Systems Principles, page 207–220, 2009.
