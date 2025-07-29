@@ -36,7 +36,7 @@ CPU 提供了實現強隔離的硬體支援。 例如，RISC-V 擁有三種 CPU 
 
 ## 2.3 Kernel organization
 
-一個關鍵的設計問題是：作業系統的哪些部分應該在 supervisor mode（監督者模式）下執行。 其中一種可能的做法是讓整個作業系統都駐留在核心中，這樣所有系統呼叫的實作都會在 supervisor mode 下執行，這種架構被稱為單體核心（monolithic kernel）
+一個關鍵的設計問題是：作業系統的哪些部分應該在 supervisor mode 下執行。 其中一種可能的做法是讓整個作業系統都駐留在核心中，這樣所有系統呼叫的實作都會在 supervisor mode 下執行，這種架構被稱為單體核心（monolithic kernel）
 
 在這種架構中，整個作業系統是由一個在擁有完整硬體特權下執行的單一程式所構成。 這樣的設計相對方便，因為作業系統設計者不需要判斷作業系統中哪些部分不需要完整的硬體權限。 此外，作業系統的不同組件之間也會更容易合作，例如作業系統可能有一個緩衝區快取（buffer cache），可供檔案系統與虛擬記憶體系統共用
 
@@ -140,7 +140,7 @@ boot loader 會將 xv6 核心載入至記憶體中的實體位址 `0x80000000`�
 `mret` 通常用來從 machine mode「回去」到 supervisor mode，也就是說前面會有個 supervisor mode 進到 machine mode 的呼叫／過程。 但 xv6 中開機過渡到 supervisor mode 的前面並沒有「S 進到 M 的過程」，只是利用它來進到 supervisor mode 而已  
 :::
 
-在進入 supervisor mode 之前，`start` 還要做一件事：設定時鐘晶片，使其產生定時中斷。 這些前置作業完成後，`start` 便會透過呼叫 `mret`「返回」到 supervisor 模式。 這會讓程式計數器跳躍到 `main`，也就是先前寫入 `mepc` 的位址
+在進入 supervisor mode 之前，`start` 還要做一件事：設定時鐘晶片，使其產生定時中斷。 這些前置作業完成後，`start` 便會透過呼叫 `mret`「返回」到 supervisor mode。 這會讓程式計數器跳躍到 `main`，也就是先前寫入 `mepc` 的位址
 
 當 `main` 初始化完若干裝置與子系統後，會透過呼叫 `userinit` 建立第一個行程。 這個第一個行程會執行一段以 RISC-V 組合語言撰寫的小程式，並發出 xv6 中的第一個系統呼叫。 `initcode.S` 會將 `exec` 系統呼叫的編號 `SYS_EXEC` 載入暫存器 `a7`，然後執行 `ecall` 指令以重新進入核心
 
