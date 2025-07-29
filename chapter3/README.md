@@ -121,6 +121,62 @@ stack 段僅佔用一個頁面，圖 3.4 中顯示的是由 `exec` 建立的初�
 
 這裡我們看到了頁表運用的幾個典型範例。 首先，不同行程的頁表會將使用者位址映射到不同的實體記憶體頁面，因此每個行程擁有各自私有的使用者記憶體。 其次，每個行程都會看到自己的記憶體是個從 0 開始且連續排列的虛擬位址空間，而實體記憶體則可以是不連續的。 第三，核心會在使用者位址空間頂端映射一個包含 trampoline 程式碼的頁面（不設置 `PTE_U`），因此這個單一實體頁面會出現在所有行程的位址空間中，但只有核心可以使用它
 
+## 3.7 Code: sbrk
+
+`sbrk` 是一個系統呼叫，用來讓一個行程可以擴增或縮減它的記憶體空間，這個系統呼叫是由 `growproc`（[kernel/vm.c:233](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/proc.c#L260)）函式實作的。 `growproc` 會根據其參數 `n` 的正負，來呼叫 `uvmalloc` 或 `uvmdealloc`。 `uvmalloc` 會使用 `kalloc` 配置實體記憶體，並將分配到的記憶體清 0，再透過 `mappages` 將各 PTE 加入使用者的頁表。 `uvmdealloc` 則會呼叫 `uvmunmap`，該函式會使用 `walk` 尋找 PTE，並透過 `kfree` 釋放它們所對應的實體記憶體
+
+xv6 為每個行程都建了頁表，不僅僅是為了告訴硬體如何將使用者虛擬位址映射到實體記憶體，同時也作為唯一的記錄，指出哪些實體記憶體頁面被分配給了該行程。 這就是為什麼在釋放使用者記憶體時（如在 `uvmunmap` 中），必須檢查該行程的頁表
+
+## 3.8 Code: exec
+
+`exec` 是一個系統呼叫，會將某個行程的使用者位址空間替換為從檔案中讀取的資料，這個檔案被稱為二進位檔或可執行檔。 二進位檔通常是編譯器與連結器的輸出結果，內含機器指令與程式資料。 `exec`（[kernel/exec.c:23](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/exec.c#L23)）會使用 `namei`（[kernel/exec.c:36](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/exec.c#L36)）開啟指定路徑 `path` 所對應的二進位檔，`namei` 的細節會在第八章中說明
+
+接著它會讀取 ELF 的標頭，xv6 的二進位檔使用一種廣泛使用的 ELF 格式，該格式定義於 [kernel/elf.h](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/elf.h#L6)。 一個 ELF 格式的檔案由一個 ELF 標頭 `struct elfhdr`，和一連串的 program section header `struct proghdr` 組成。 每個 `proghdr` 描述了應載入記憶體中的一個應用程式區段，xv6 的程式通常有兩個 program section header：一個用於指令段，一個用於資料段
+
+第一個步驟是快速檢查該檔案是否可能是一個 ELF 二進位檔。 一個 ELF 檔案的開頭會包含四個位元組的「魔術號」：`0x7F`、`'E'`、`'L'`、`'F'`，也可寫成 `ELF_MAGIC`。 如果 ELF 標頭的魔術號正確，`exec` 就會假設這個二進位檔格式正確無誤
+
+`exec` 會透過 `proc_pagetable`（[kernel/exec.c:49](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/exec.c#L49)）建立一個不含任何使用者映射的新頁表，並透過 `uvmalloc`（[kernel/exec.c:65](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/exec.c#L65)）為每個 ELF 段分配記憶體，再用 `loadseg` 將每個段載入到記憶體中。 `loadseg`（[kernel/exec.c:10](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/exec.c#L10)）會使用 `walkaddr` 來找到已分配記憶體的實體位址，以便寫入 ELF 段內每一頁的資料，並使用 `readi` 從檔案中讀取資料
+
+`/init` 是第一個使用 `exec` 創建的使用者程式，其 program section header 如下：
+
+```
+# objdump -p user/_init
+
+user/_init:     file format elf64-little
+
+Program Header:
+0x70000003 off    0x0000000000006bb0 vaddr 0x0000000000000000
+                                       paddr 0x0000000000000000 align 2**0
+         filesz 0x000000000000004a memsz 0x0000000000000000 flags r--
+    LOAD off    0x0000000000001000 vaddr 0x0000000000000000
+                                       paddr 0x0000000000000000 align 2**12
+         filesz 0x0000000000001000 memsz 0x0000000000001000 flags r-x
+    LOAD off    0x0000000000002000 vaddr 0x0000000000001000
+                                       paddr 0x0000000000001000 align 2**12
+         filesz 0x0000000000000010 memsz 0x0000000000000030 flags rw-
+   STACK off    0x0000000000000000 vaddr 0x0000000000000000
+                                       paddr 0x0000000000000000 align 2**4
+         filesz 0x0000000000000000 memsz 0x0000000000000000 flags rw-
+```
+
+我們可以看到，text 段應該從檔案中偏移量為 `0x1000` 的位置載入到記憶體中虛擬位址為 `0x0` 的位置，且不具有寫入權限。 我們也可以看到，data 段應該載入到頁面對齊的位址 `0x1000`，並且不具有執行權限
+
+一個程式區段的 `filesz` 可能會小於 `memsz`，表示兩者之間的差距應該用零填滿（例如 C 的全域變數），而不是從檔案中讀取資料。 以 `/init` 為例，其資料段的 `filesz` 為 `0x10` bytes，而 `memsz` 為 `0x30` bytes，因此 `uvmalloc` 會配置足夠的實體記憶體以容納 `0x30` bytes，但僅從 `/init` 檔案中讀取 `0x10` bytes 的資料
+
+現在 `exec` 會分配並初始化使用者堆疊，它只會分配一頁作為堆疊。 `exec` 將每個字串參數依序複製到堆疊頂部，並將它們的指標記錄在 `ustack` 中。 它會在即將傳給 `main` 的 `argv` 清單末端放上一個 `null` 指標。 `argc` 與 `argv` 的值會透過系統呼叫的回傳路徑傳給 `main`：`argc` 會經由系統呼叫的回傳值傳遞，放在暫存器 `a0` 中； 而 `argv` 則透過該行程的陷阱框架區（trapframe）中的 `a1` 欄位傳遞
+
+`exec` 會在堆疊頁的下方放置一個不可存取的頁面，這樣若有程式試圖使用超過一頁的堆疊時就會產生錯誤。 這個不可存取的頁面也讓 `exec` 能夠處理參數過大的情況； 若發生這種情形，`exec` 所使用的 `copyout`（[kernel/vm.c:359](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/vm.c#L359)）函數會在把參數複製到堆疊時發現目標頁面無法存取，然後回傳 -1
+
+在準備新的記憶體映像的過程中，若 `exec` 偵測到錯誤，例如無效的程式區段，它會跳轉到標籤 `bad`，釋放新建立的映像，並回傳 -1。 `exec` 必須等到確定這次系統呼叫會成功時，才會釋放舊有的映像：因為若舊映像已經被釋放，系統呼叫就無法再回傳 -1 給它。 `exec` 中所有的錯誤情況都只會發生在建立新映像的過程中，一旦映像建構完成（[kernel/exec.c:125](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/exec.c#L125)），`exec` 就可以正式切換到新的頁表並釋放舊的頁表了（[kernel/exec.c:129](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/exec.c#L129)）
+
+`exec` 會依照 ELF 檔案所指定的位址，將其位元組資料載入到記憶體中。 由於使用者或行程可以在 ELF 檔中放入任意位址，因此 `exec` 存在風險，ELF 檔中的位址可能會指向核心區域，無論是意外還是惡意行為。 對於不設防的核心來說，其後果從系統崩潰到惡意破壞核心隔離機制（即安全漏洞）都有可能發生
+
+Xv6 採取了一些檢查措施以避免這些風險。 例如，使用者可以製作一個 ELF 檔，讓 `ph.vaddr` 指向一個任意位址，並給 `ph.memsz` 一個足夠大的值，讓相加結果發生溢位並變成像 `0x1000` 這樣看似合理的值。 xv6 使用 `if(ph.vaddr + ph.memsz < ph.vaddr)` 來檢查這兩者相加時是否發生 64 位元整數溢位，以達到防禦的效果
+
+在舊版的 xv6 中，使用者位址空間也包含了核心（雖然在使用者模式中無法讀寫），使用者可以選擇一個對應到核心記憶體的位址，這樣 ELF 檔的資料就會被複製進核心。 這在 RISC-V 版本的 xv6 中不會發生，因為核心擁有獨立的頁表； loadseg 會將資料載入行程的頁表，而非核心的頁表
+
+對於核心開發者來說，很容易會遺漏關鍵地檢查。 實際上在核心發展歷史中，常常會因為檢查不足而讓使用者程式得以利用漏洞獲得核心權限。 xv6 很可能也沒有完全驗證由使用者層傳入核心的資料，這可能會被惡意的使用者程式加以利用，來繞過 xv6 的隔離機制
+
 ## Bibliography
 
 - <a id="1">[1]</a>：The RISC-V instruction set manual Volume II: privileged specification. https://drive.google.com/file/d/1uviu1nH-tScFfgrovvFCrj7Omv8tFtkp/view?usp=drive_link, 2024
