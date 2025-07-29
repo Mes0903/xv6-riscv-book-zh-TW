@@ -6,7 +6,7 @@
 
 回顧一下，RISC-V 的指令（無論是使用者或核心）所操作的是虛擬位址。 機器的 RAM，也就是實體記憶體，則是以實體位址來索引。 RISC-V 的頁表硬體會將這兩種位址連接起來，將每個虛擬位址對應到一個實體位址來完成映射
 
-xv6 運行在 Sv39 的 RISC-V 架構上，這代表 64 位元虛擬位址中，只有最低的 39 個位元會被使用，最上面的 25 個位元則不會被使用。 在 Sv39 的設定下，一個 RISC-V 頁表在邏輯上是一個包含 2<sup>27</sup>（134,217,728）個頁表項（PTE）的陣列。 每個 PTE 包含一個 44 位元的實體頁面編號（PPN）以及一些旗標
+xv6 運行在 Sv39 的 RISC-V 架構上，這代表 64 位元虛擬位址中，只有最低的 39 個位元會被使用，最上面的 25 個位元則不會被使用。 在 Sv39 的設定下，一個 RISC-V 頁表在邏輯上是一個包含 2<sup>27</sup>（134,217,728）個 PTE 的陣列。 每個 PTE 包含一個 44 位元的實體頁面編號（PPN）以及一些旗標
 
 分頁硬體會使用 39 位元中最高的 27 位元作為索引查找頁表，找到對應的 PTE，然後組合成一個 56 位元的實體位址：其最高 44 位元來自 PTE 裡的 PPN，最低 12 位元則複製自原本的虛擬位址。 圖 3.1 顯示了這個流程，使用一個簡化為 PTE 陣列的邏輯頁表來呈現（更完整的結構請參考圖 3.2）。 頁表讓作業系統可以以 4096（2<sup>12</sup>）位元組對齊的區塊為單位，控制虛擬位址到實體位址的對應關係。 這種區塊就被稱作「頁面（page）」
 
@@ -54,6 +54,32 @@ QEMU 模擬了一台電腦，其中的 RAM（實體記憶體）從實體位址 `
 雖然核心透過高位址的映射使用它的堆疊，但核心其實也可以透過直接映射的位址存取這些堆疊。 另一種設計可能會只使用直接映射的方式，直接在那個位址操作堆疊。 不過在這種設計中，如果要提供 guard 頁面，就得取消某些本來會對應到實體記憶體的虛擬位址，這會讓記憶體變得難以使用
 
 核心將 trampoline 頁面與核心程式碼頁面設置為具有 `PTE_R` 與 `PTE_X` 的權限，這表示核心可以在這些頁面上讀取並執行指令。 其他頁面則被設置為具有 `PTE_R` 與 `PTE_W` 的權限，以便核心能夠對這些頁面進行讀寫。 至於 guard 頁面，則被設為無效映射
+
+## 3.3 Code: creating an address space
+
+xv6 中大多數負責操作位址空間與頁表的程式碼都寫在 vm.c（[kernel/vm.c:1](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/vm.c#L1)）中。 主要的資料結構是 `pagetable_t`，它實際上是一個指向 RISC-V 根頁表的頁面的指標。 `pagetable_t` 的實例可能是核心的頁表，也可能是某個行程的頁表。 相關的主要函式有 `walk`，它用來找出某個虛擬位址對應的 PTE，以及 `mappages`，它會為新的映射關係建立對應的 PTE
+
+以 `kvm` 開頭的函式會操作核心的頁表； 以 `uvm` 開頭的函式會操作使用者的頁表； 其他函式則可能同時用於兩者。 `copyout` 與 `copyin` 用來從系統呼叫的參數提供的使用者虛擬位址中複製資料進出，這兩個函式之所以寫在 vm.c 裡，是因為它們必須顯式地將虛擬位址轉換成對應的物理位址
+
+在開機流程的早期，`main` 會呼叫 `kvminit`，透過 `kvmmake` 建立核心的頁表。 這個呼叫發生在 xv6 尚未啟用 RISC-V 的分頁功能之前，因此當時的位址仍直接對應到實體記憶體。 `kvmmake` 會先分配一頁實體記憶體作為根頁表的頁面，接著呼叫 `kvmmap` 來設置核心所需的映射關係。 這些映射包含了核心的程式與資料、本機到 `PHYSTOP` 為止的實體記憶體，以及實際上是裝置的某些記憶體區段。 `proc_mapstacks` 為每個行程配置一個核心堆疊，它會呼叫 `kvmmap`，把每個堆疊映射到由 `KSTACK` 產生的虛擬位址，同時為無效的 guard 頁面預留空間
+
+`kvmmap`（[kernel/vm.c:132](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/vm.c#L132)）會呼叫 `mappages`（[kernel/vm.c:144](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/vm.c#L144)），針對目標範圍內的每個虛擬位址，以頁面大小為間格，將其映射關係加入到頁表中。 對於每個要映射的虛擬位址，`mappages` 會呼叫 `walk` 找到該位址對應的 PTE 位址，然後初始化這個 PTE，填入對應的實體頁號、所需的存取權限（例如 `PTE_W`、`PTE_X` 或 `PTE_R`），並設置 `PTE_V` 將該 PTE 標記為有效頁面
+
+`walk`（[kernel/vm.c:86](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/vm.c#L86)）模擬 RISC-V 分頁硬體的行為，用來查找某個虛擬位址對應的 PTE。 `walk` 一次會往下走訪一層頁表，並使用該層虛擬位址的 9 個位元來索引對應的頁表。 在每一層頁表當中，它可能會找到下一層頁表的 PTE，或者是最終頁面的 PTE（[kernel/vm.c:92](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/vm.c#L92)）。 如果第一層或第二層的頁表中的 PTE 無效，表示該層的頁面尚未配置； 如果設置了 `alloc` 參數，`walk` 就會為新頁表配置一個新的頁面，並把它的實體位址寫入該 PTE。 最終 `walk` 會回傳樹中最底層那個 PTE 的位址（[kernel/vm.c:102](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/vm.c#L102)）
+
+上述的程式碼只能在實體記憶體已被直接映射到核心的虛擬位址空間內的情況下執行。 例如，當 `walk` 向下走訪頁表時，它會從某個 PTE 中取得下一層頁表的實體位址（[kernel/vm.c:94](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/vm.c#L94)），然後把這個位址當作虛擬位址使用，來存取下一層的 PTE（[kernel/vm.c:92](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/vm.c#L92)）
+
+`main` 會呼叫 `kvminithart`（[kernel/vm.c:62](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/vm.c#L62)）來載入核心的頁表，這個函式會將根頁表的頁面的實體位址寫入暫存器 `satp`，之後CPU 就會開始使用這份核心的頁表來進行位址轉譯。 由於核心使用的是直接映射，接下來的指令所使用的虛擬位址將會正確地映射到對應的實體記憶體位址上
+
+每顆 RISC-V CPU 都會將 PTE 快取在 TLB（Translation Look-aside Buffer）中，而當 xv6 修改頁表時，它必須通知 CPU 將對應的 TLB 快取項目作廢。 否則之後 TLB 可能會使用到過時的快取映射，進而指向一個已經被分配給其他行程的實體頁面，導致某個行程不小心寫入其他行程的記憶體。 RISC-V 提供一條名為 `sfence.vma` 的指令，用於清空當前 CPU 的 TLB。 xv6 會在 `kvminithart` 中重新載入 `satp` 後執行 `sfence.vma`，或在切換至使用者頁表的 trampoline 程式碼中，於返回使用者空間之前執行 `sfence.vma`
+
+在更改 `satp` 之前也必須執行一次 `sfence.vma`，以等待所有的 load 與 store 操作完成，這能確保先前對頁表的更新已完成，並且也能保證先前的 load 與 store 操作會使用舊的頁表，而不是新的頁表
+
+::: tip  
+`sfence.vma` 不只是用來清除 TLB，也可以作為一種記憶體屏障（memory barrier），確保舊頁表的操作完成後，才開始使用新頁表，以避免順序錯亂造成的錯誤  
+:::
+
+為了避免整個 TLB 被清空，RISC-V CPU 可能會支援 ASID<sup>[[1]](#1)</sup>。 這樣核心就可以只清除屬於特定地址空間的 TLB 項目。 但 xv6 並未使用這項功能
 
 ## Bibliography
 
