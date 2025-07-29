@@ -81,6 +81,24 @@ xv6 中大多數負責操作位址空間與頁表的程式碼都寫在 vm.c（[k
 
 為了避免整個 TLB 被清空，RISC-V CPU 可能會支援 ASID<sup>[[1]](#1)</sup>。 這樣核心就可以只清除屬於特定地址空間的 TLB 項目。 但 xv6 並未使用這項功能
 
+## 3.4 Physical memory allocation
+
+核心在執行期間必須為頁表、使用者記憶體、核心堆疊，以及管道（pipe）緩衝區分配與釋放實體記憶體。 xv6 使用從核心結束位址到 `PHYSTOP` 之間的實體記憶體區域作為執行期間的配置來源，每次以 4096 位元組為單位配置與釋放整個頁面。 它透過將這些頁面本身串成一個 linked list 來追蹤空閒頁面，配置時會從 list 中取出一頁，而釋放時則是將該頁加入串列中
+
+## 3.5 Code: Physical memory allocator
+
+記憶體配置器實作於 kalloc.c（[kernel/kalloc.c:1](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/kalloc.c#L1)）中。 這個配置器是一個可分配的實體記憶體頁面所組成的「空閒串列（free list）」，串列的元素為 `struct run`，對應到一個空閒頁面
+
+因為這些空閒頁面內並沒存其他東西，因此配置器會把每個空閒頁面對應的 `run` 結構直接存在該頁面裡面，使配置器之後能夠取得這個空閒串列的記憶體。 這個空閒串列還受到一個自旋鎖的保護（[kernel/kalloc.c:21-24](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/kalloc.c#L21-L24)），它們會一起被包在一個結構體裡，以明確表示該鎖保護的是此結構體內的欄位。 目前可以先忽略鎖以及 `acquire` 和 `release` 的呼叫，第五章會詳細討論 locking
+
+`main` 函式會呼叫 `kinit` 來初始化配置器（[kernel/kalloc.c:27](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/kalloc.c#L27)），其會將空閒串列初始化為包含「從核心結尾到 `PHYSTOP`之間」的所有頁面。 理論上 xv6 應該要透過解析硬體所提供的設定資訊來判斷可用的實體記憶體大小，但 xv6 採取了簡化的做法：直接假設機器擁有 128MB 的記憶體。 `kinit` 會呼叫 `freerange`，並對每一頁都呼叫 `kfree`，以將記憶體加入空閒串列
+
+由於 PTE 只能對齊到 4096 位元組（即 4096 的倍數）的實體位址，因此 `freerange` 使用 `PGROUNDUP` 來確保只會釋放有對齊的實體位址。 配置器一開始沒有任何可用的記憶體，這些 `kfree` 的呼叫則為它提供了可以管理的記憶體
+
+配置器有時會將位址當作整數使用，以便對它們進行數學運算（例如在 `freerange` 中走訪所有頁面），有時又會將位址當作指標使用，用來讀寫記憶體（例如操作儲存在各頁面中的 `run` 結構）； 這種「位址的雙重用途」是配置器的實作中充滿 C type cast 的主要原因
+
+`kfree` 函式會先將要釋放的記憶體中的每個位元組都設為數值 1。 這樣一來，若有程式在釋放後仍使用該記憶體（也就是所謂的「懸空參考（dangling reference）」），它讀取到的也會是雜訊資料而不是原本的正確內容，理論上可以更快地暴露錯誤。 接下來，`kfree` 會將該頁面加入空閒串列的前端：它將實體位址（`pa`）轉型為指向 `struct run` 的指標，將原本空閒串列的開頭記錄在 `r->next`，然後再將空閒串列的開頭設為 `r`。 而 `kalloc` 則會從空閒串列中取出（removes）並回傳第一個元素
+
 ## Bibliography
 
 - <a id="1">[1]</a>：The RISC-V instruction set manual Volume II: privileged specification. https://drive.google.com/file/d/1uviu1nH-tScFfgrovvFCrj7Omv8tFtkp/view?usp=drive_link, 2024
