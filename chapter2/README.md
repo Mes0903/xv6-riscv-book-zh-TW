@@ -1,4 +1,15 @@
-# Chapter2：Operating system organization
+---
+title: xv6 riscv book chapter 2：Operating system organization
+date: 2025-07-27
+tag: 
+- OS
+- risc-v
+category: 
+- OS
+- risc-v
+---
+
+# xv6 riscv book chapter 2：Operating system organization
 
 作業系統的一項關鍵需求是要能夠同時支援多個活動，例如透過第一章所描述的系統呼叫介面，一個行程可以使用 `fork` 建立新的行程。 作業系統還必須在這些行程之間分時共享電腦的資源，例如即使行程數量超過了硬體 CPU 的數量，作業系統仍必須確保所有行程都能獲得執行的機會。 作業系統也必須在行程之間安排隔離機制，換句話說如果某個行程出現錯誤並發生故障，它不應該影響到那些不依賴它的行程。 然而，完全的隔離又過於強硬，因為行程之間應要可以有意地互動，例如 pipeline 就是一個例子。 因此，作業系統必須滿足三個需求：多工（multiplexing）、隔離（isolation）與互動（interaction）
 

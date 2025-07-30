@@ -1,4 +1,15 @@
-# Chapter 3：Page tables
+---
+title: xv6 riscv book chapter 3：Page tables
+date: 2025-07-30
+tag: 
+- OS
+- risc-v
+category: 
+- OS
+- risc-v
+---
+
+# xv6 riscv book chapter 3：Page tables
 
 Page table 是作業系統用來為每個行程提供私有位址空間與記憶體的最常見的機制。 page table 決定了記憶體位址的含義，以及哪些物理記憶體區段可以被存取。 它們讓 xv6 能夠隔離不同行程的位址空間，並將它們多工使用在單一的物理記憶體上
 

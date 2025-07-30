@@ -1,4 +1,15 @@
-# Chapter 1：Operating system interfaces
+---
+title: xv6 riscv book chapter 1：Operating system interfaces
+date: 2025-07-27
+tag: 
+- OS
+- risc-v
+category: 
+- OS
+- risc-v
+---
+
+# xv6 riscv book chapter 1：Operating system interfaces
 
 作業系統的任務，是要讓多個程式能夠共享同一部電腦，並提供比硬體本身更多、更加實用的功能。 作業系統負責管理並抽象化底層硬體，使得如文字處理器這類應用程式無需關心所使用的是哪一種硬碟。 作業系統能讓多個程式共享硬體資源，並使它們能夠同時執行（或至少看起來是同時執行）。 最後，作業系統還提供讓程式之間可以互相溝通的介面，使它們能夠共享資料或協同作業
 
