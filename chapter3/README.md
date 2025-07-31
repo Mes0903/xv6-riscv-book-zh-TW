@@ -49,17 +49,17 @@ paging hardware 會使用 27 位元中最高的 9 位來在 root page table 中�
 
 這裡對書中所使用的一些術語做個簡要說明。 「實體記憶體」是指 RAM 中的儲存單元。 一個實體記憶體位元組會有一個稱為「實體位址」的位址。 那些會解參考位址的指令（例如 `load`、`store`、`jump`、function call）只會使用虛擬位址，這些虛擬位址會先由 paging hardware 轉換為實體位址，再送到 RAM 進行讀寫
 
-「位址空間」是指在某個 page table 中有效的虛擬位址集合； xv6 中的每個行程都有自己的使用者位址空間，xv6  kernel 本身也有自己的位址空間。 「使用者記憶體」是行程的使用者位址空間加上 page table 允許該行程存取的實體記憶體。 「虛擬記憶體」是一組與 page table 管理有關的概念與技術，並透過它們來實現如隔離等目標
+「位址空間」是指在某個 page table 中有效的虛擬位址集合； xv6 中的每個行程都有自己的使用者位址空間，xv6 kernel 本身也有自己的位址空間。 「使用者記憶體」是行程的使用者位址空間加上 page table 允許該行程存取的實體記憶體。 「虛擬記憶體」是一組與 page table 管理有關的概念與技術，並透過它們來實現如隔離等目標
 
 ## 3.2 Kernel address space
 
-xv6 為每個行程維護一個 page table，用來描述該行程的使用者位址空間，此外還有一份單獨、全域的 page table 描述 kernel 的位址空間。 kernel 會配置自己位址空間的佈局（layout），使其能夠在預期的虛擬位址上存取實體記憶體與各種硬體資源。 圖 3.3 顯示這個佈局如何將 kernel 虛擬位址對應到實體位址。 [kernel/memlayout.h](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/memlayout.h) 中宣告了 xv6  kernel 記憶體佈局的各種常數
+xv6 為每個行程維護一個 page table，用來描述該行程的使用者位址空間，此外還有一份單獨、全域的 page table 描述 kernel 的位址空間。 kernel 會配置自己位址空間的佈局（layout），使其能夠在預期的虛擬位址上存取實體記憶體與各種硬體資源。 圖 3.3 顯示這個佈局如何將 kernel 虛擬位址對應到實體位址。 [kernel/memlayout.h](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/memlayout.h) 中宣告了 xv6 kernel 記憶體佈局的各種常數
 
 ![（Figure 3.3: On the left, xv6’s kernel address space. RWX refer to PTE read, write, and execute permissions. On the right, the RISC-V physical address space that xv6 expects to see.）](image/xv6_layout.png)
 
 QEMU 模擬了一台電腦，其中的 RAM（實體記憶體）從實體位址 `0x80000000` 開始，持續到 `0x88000000` 以上，這段範圍在 xv6 中稱為 `PHYSTOP`。 QEMU 的模擬也包含像是硬碟介面這樣的 I/O 裝置，QEMU 以記憶體映射控制暫存器（memory-mapped control registers）的方式，將這些裝置的介面暴露給軟體，這些暫存器位於實體位址空間中小於 `0x80000000` 的位置。 kernel 可以透過讀寫這些特殊的實體位址與裝置互動，換句話說這些讀寫會與裝置硬體溝通，而非與 RAM 互動。 第四章會解釋 xv6 是如何與裝置互動的
 
- kernel 透過「直接映射（direct mapping）」的方式來存取 RAM 與 memory-mapped 的裝置暫存器，其會將資源映射到與其實體位址相同的虛擬位址上（VA == PA），例如 kernel 本身在虛擬位址空間與實體記憶體中都位於 `KERNBASE=0x80000000`。 直接映射能簡化 kernel 對實體記憶體的讀寫程式碼，例如在 `fork` 配置子行程的使用者記憶體時，配置器會回傳那塊記憶體的實體位址； `fork` 在複製父行程的使用者記憶體到子行程時，會直接把這個實體位址當作虛擬位址使用
+kernel 透過「直接映射（direct mapping）」的方式來存取 RAM 與 memory-mapped 的裝置暫存器，其會將資源映射到與其實體位址相同的虛擬位址上（VA == PA），例如 kernel 本身在虛擬位址空間與實體記憶體中都位於 `KERNBASE=0x80000000`。 直接映射能簡化 kernel 對實體記憶體的讀寫程式碼，例如在 `fork` 配置子行程的使用者記憶體時，配置器會回傳那塊記憶體的實體位址； `fork` 在複製父行程的使用者記憶體到子行程時，會直接把這個實體位址當作虛擬位址使用
 
 有一些 kernel 的虛擬位址並不是直接映射的：
 
@@ -70,13 +70,13 @@ QEMU 模擬了一台電腦，其中的 RAM（實體記憶體）從實體位址 `
 
 雖然 kernel 透過高位址的映射使用它的 stack，但 kernel 其實也可以透過直接映射的位址存取這些 stack。 另一種設計可能會只使用直接映射的方式，直接在那個位址操作 stack。 不過在這種設計中，如果要提供 guard page，就得取消某些本來會對應到實體記憶體的虛擬位址，這會讓記憶體變得難以使用
 
- kernel 將 trampoline page 與 kernel 程式碼的 page 設置為具有 `PTE_R` 與 `PTE_X` 的權限，這表示 kernel 可以在這些 page 上讀取並執行指令。 其他 page 則被設置為具有 `PTE_R` 與 `PTE_W` 的權限，以便 kernel 能夠對這些 page 進行讀寫。 至於 guard page，則被設為無效映射
+kernel 將 trampoline page 與 kernel 程式碼的 page 設置為具有 `PTE_R` 與 `PTE_X` 的權限，這表示 kernel 可以在這些 page 上讀取並執行指令。 其他 page 則被設置為具有 `PTE_R` 與 `PTE_W` 的權限，以便 kernel 能夠對這些 page 進行讀寫。 至於 guard page，則被設為無效映射
 
 ## 3.3 Code: creating an address space
 
 xv6 中大多數負責操作位址空間與 page table 的程式碼都寫在 vm.c（[kernel/vm.c:1](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/vm.c#L1)）中。 主要的資料結構是 `pagetable_t`，它實際上是一個指向 RISC-V root page table 的 page 的指標。 `pagetable_t` 的實例可能是 kernel 的 page table，也可能是某個行程的 page table。 相關的主要函式有 `walk` 與 `mappages`，前者用來找出某個虛擬位址對應的 PTE，後者會為新的映射關係建立對應的 PTE
 
-以 `kvm` 開頭的函式會操作 kernel 的 page table； 以 `uvm` 開頭的函式會操作使用者的 page table； 其他函式則可能同時用於兩者。 `copyout` 與 `copyin` 用來從系統呼叫的引數提供的使用者虛擬位址中複製資料進出，這兩個函式之所以寫在 vm.c 裡，是因為它們必須顯式地將虛擬位址轉換成對應的物理位址
+以 `kvm` 開頭的函式會操作 kernel 的 page table； 以 `uvm` 開頭的函式會操作 user 的 page table； 其他函式則可能同時用於兩者。 `copyout` 與 `copyin` 用來從系統呼叫的引數提供的使用者虛擬位址中複製資料進出，這兩個函式之所以寫在 vm.c 裡，是因為它們必須顯式地將虛擬位址轉換成對應的物理位址
 
 在開機流程的早期，`main` 會呼叫 `kvminit`，透過 `kvmmake` 建立 kernel 的 page table。 這個呼叫發生在 xv6 尚未啟用 RISC-V 的 paging 功能之前，因此當時的位址仍直接對應到實體記憶體。 `kvmmake` 會先分配一個 page 的實體記憶體作為 root page table，接著呼叫 `kvmmap` 來設置 kernel 所需的映射關係。 這些映射包含了 kernel 的程式與資料、本機到 `PHYSTOP` 為止的實體記憶體，以及實際上是裝置的某些記憶體區段。 `proc_mapstacks` 為每個行程配置一個 kernel stack，它會呼叫 `kvmmap`，把每個 stack 映射到由 `KSTACK` 產生的虛擬位址，同時為無效的 guard page 預留空間
 
@@ -87,6 +87,121 @@ xv6 中大多數負責操作位址空間與 page table 的程式碼都寫在 vm.
 上述的程式碼只能在實體記憶體已被直接映射到 kernel 的虛擬位址空間內的情況下執行。 例如，當 `walk` 向下走訪 page table 時，它會從某個 PTE 中取得下一層 page table 的實體位址（[kernel/vm.c:94](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/vm.c#L94)），然後把這個位址當作虛擬位址使用，來存取下一層的 PTE（[kernel/vm.c:92](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/vm.c#L92)）
 
 `main` 會呼叫 `kvminithart`（[kernel/vm.c:62](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/vm.c#L62)）來載入 kernel 的 page table，這個函式會將 root page table 的 page 的實體位址寫入暫存器 `satp`，之後 CPU 就會開始使用這份 kernel 的 page table 來進行位址轉譯。 由於 kernel 使用的是直接映射，接下來的指令所使用的虛擬位址將會正確地映射到對應的實體記憶體位址上
+
+::: tip  
+雖然 kernel page table 是以 direct mapping 初始化的，這並不代表其是使用 Bare Mode 在做 paging，而是指你將拿到的 VA 以 Sv39 的規則去查 kernel page table 時，最後得出的 VA 會剛好等於 PA
+
+以 uart register 為例，他在 kernel page table 中被這麼初始化：
+
+```c
+// Make a direct-map page table for the kernel.
+pagetable_t
+kvmmake(void)
+{
+
+  pagetable_t kpgtbl;
+
+  kpgtbl = (pagetable_t) kalloc();
+  memset(kpgtbl, 0, PGSIZE);
+
+  // uart registers
+  kvmmap(kpgtbl, UART0, UART0, PGSIZE, PTE_R | PTE_W);
+  ...
+}
+```
+
+其中 `UART0 = 0x10000000L`，`PGSIZE = 4096`。 而如前面所述 `kvmmap` 會呼叫 `mappages`：
+
+```c
+// add a mapping to the kernel page table.
+// only used when booting.
+// does not flush TLB or enable paging.
+void
+kvmmap(pagetable_t kpgtbl, uint64 va, uint64 pa, uint64 sz, int perm)
+{
+  if(mappages(kpgtbl, va, sz, pa, perm) != 0)
+    panic("kvmmap");
+}
+```
+
+因此你可以看見，在其傳入 `kvmmap` 的參數中，`va` 與 `pa` 是直接寫了相同的值 `UART0`，這就是 direct mapping 的意思。 而 `mappages` 會利用 `walk` 來判斷你給的參數 `va` 在 kernel page table 中是否已經被映射了：
+
+```c
+// Create PTEs for virtual addresses starting at va that refer to
+// physical addresses starting at pa.
+// va and size MUST be page-aligned.
+// Returns 0 on success, -1 if walk() couldn't
+// allocate a needed page-table page.
+int
+mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
+{
+  uint64 a, last;
+  pte_t *pte;
+
+  if((va % PGSIZE) != 0)
+    panic("mappages: va not aligned");
+
+  if((size % PGSIZE) != 0)
+    panic("mappages: size not aligned");
+
+  if(size == 0)
+    panic("mappages: size");
+  
+  a = va;
+  last = va + size - PGSIZE;
+  for(;;){
+    if((pte = walk(pagetable, a, 1)) == 0)
+      return -1;
+    if(*pte & PTE_V)
+      panic("mappages: remap");
+    *pte = PA2PTE(pa) | perm | PTE_V;
+    if(a == last)
+      break;
+    a += PGSIZE;
+    pa += PGSIZE;
+  }
+  return 0;
+}
+```
+
+`walk` 固定會走訪三層 page table，如果途中發現某個 PTE 的值還是 0（未配置），就會用 `kalloc` 要一個 page frame，並把該 PTE 指向它：
+
+```c
+// Return the address of the PTE in page table pagetable
+// that corresponds to virtual address va.  If alloc!=0,
+// create any required page-table pages.
+//
+// The risc-v Sv39 scheme has three levels of page-table
+// pages. A page-table page contains 512 64-bit PTEs.
+// A 64-bit virtual address is split into five fields:
+//   39..63 -- must be zero.
+//   30..38 -- 9 bits of level-2 index.
+//   21..29 -- 9 bits of level-1 index.
+//   12..20 -- 9 bits of level-0 index.
+//    0..11 -- 12 bits of byte offset within the page.
+pte_t *
+walk(pagetable_t pagetable, uint64 va, int alloc)
+{
+  if(va >= MAXVA)
+    panic("walk");
+
+  for(int level = 2; level > 0; level--) {
+    pte_t *pte = &pagetable[PX(level, va)];
+    if(*pte & PTE_V) {
+      pagetable = (pagetable_t)PTE2PA(*pte);
+    } else {
+      if(!alloc || (pagetable = (pde_t*)kalloc()) == 0)
+        return 0;
+      memset(pagetable, 0, PGSIZE);
+      *pte = PA2PTE(pagetable) | PTE_V;
+    }
+  }
+  return &pagetable[PX(0, va)];
+}
+```
+
+也因此 kernel page table 一樣有三層  
+:::
 
 每顆 RISC-V CPU 都會將 PTE 快取在 TLB（Translation Look-aside Buffer）中，而當 xv6 修改 page table 時，它必須通知 CPU 將對應的 TLB 快取項目作廢。 否則之後 TLB 可能會使用到過時的快取映射，進而指向一個已經被分配給其他行程的 page frame，導致某個行程不小心寫入其他行程的記憶體
 
@@ -100,11 +215,11 @@ RISC-V 提供一條名為 `sfence.vma` 的指令，用於清空當前 CPU 的 TL
 
 ## 3.4 Physical memory allocation
 
- kernel 在執行期間必須為 page table、使用者記憶體、kernel stack，以及 pipe 緩衝區分配與釋放實體記憶體。 xv6 使用從 kernel 結束位址到 `PHYSTOP` 之間的實體記憶體區域作為執行期間的配置來源，每次以 4096 位元組為單位配置與釋放整個 page。 它透過將這些 page 本身串成一個 linked list 來追蹤空閒 page，配置時會從 list 中取出一個 page，而釋放時則是將該 page 加入 list 中
+kernel 在執行期間必須為 page table、使用者記憶體、kernel stack，以及 pipe 緩衝區分配與釋放實體記憶體。 xv6 使用從 kernel 結束位址到 `PHYSTOP` 之間的實體記憶體區域作為執行期間的配置來源，每次以 4096 位元組為單位配置與釋放整個 page。 它透過將這些 page 本身串成一個 linked list 來追蹤 free page，配置時會從 list 中取出一個 page，而釋放時則是將該 page 加入 list 中
 
 ## 3.5 Code: Physical memory allocator
 
-記憶體配置器實作於 kalloc.c（[kernel/kalloc.c:1](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/kalloc.c#L1)）中。 這個配置器是一個可分配的實體記憶體 page 所組成的「free list」，其的元素為 `struct run`，對應到一個空閒 page 
+記憶體配置器實作於 kalloc.c（[kernel/kalloc.c:1](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/kalloc.c#L1)）中。 這個配置器是一個可分配的實體記憶體 page 所組成的「free list」，其的元素為 `struct run`，對應到一個 free page 
 
 因為這些 free page 內並沒存其他東西，因此配置器會把每個 free page 對應的 `run` 結構體直接存在該 page 裡面，使配置器之後能夠取得這個 free list 的記憶體。 這個 free list 還受到一個自旋鎖的保護（[kernel/kalloc.c:21-24](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/kalloc.c#L21-L24)），它們會一起被包在一個結構體裡，以明確表示該鎖保護的是此結構體內的欄位。 目前可以先忽略鎖以及 `acquire` 和 `release` 的呼叫，第六章會詳細討論 locking
 
@@ -204,7 +319,7 @@ RISC-V 支援針對實體位址層級的保護功能，但 xv6 並未使用這�
 
 在擁有大量記憶體的機器上，使用 RISC-V 所支援的「super pages」是合理的。 但當實體記憶體很小時，使用小 page 比較合理，這樣可以以更細緻的粒度進行配置與 page-out 到硬碟。 例如，如果一個程式只用到 8 KB 記憶體，卻給它一整個 4 MB 的超大 page，那就很浪費。 在具備大量 RAM 的機器上，使用大 page 比較合理，並且可以減少管理 page table 的負擔
 
-xv6  kernel 缺乏類似 `malloc` 的配置器來提供小型物件的記憶體空間，這使得 kernel 無法使用需要動態分配的複雜資料結構。 更精緻的 kernel 會配置多種大小的小型區塊，而不只是像 xv6 一樣僅使用 4096 位元組的區塊； 一個真正的 kernel 配置器需要同時處理大與小的記憶體分配需求
+xv6 kernel 缺乏類似 `malloc` 的配置器來提供小型物件的記憶體空間，這使得 kernel 無法使用需要動態分配的複雜資料結構。 更精緻的 kernel 會配置多種大小的小型區塊，而不只是像 xv6 一樣僅使用 4096 位元組的區塊； 一個真正的 kernel 配置器需要同時處理大與小的記憶體分配需求
 
 記憶體分配一直是個經久不衰的熱門議題，其基本問題是如何有效利用有限的記憶體，並為未來不可預期的請求做準備。 而如今人們更在意分配速度，而非空間效率
 

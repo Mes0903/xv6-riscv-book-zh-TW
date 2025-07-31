@@ -65,7 +65,7 @@ CPU 提供了實現強隔離的硬體支援。 例如，RISC-V 擁有三種 CPU 
 
 在微 kernel 架構中，kernel 介面只包含一些低層次的功能，例如啟動應用程式、傳送訊息、存取裝置硬體等。 這使得 kernel 本身的設計相對簡單，因為大部分的作業系統功能都由 user-level 的伺服器來負責
 
-在現實世界中，單體 kernel 與微 kernel 這兩種架構都很流行。 許多 Unix  kernel 採用單體架構，例如 Linux 就是一個單體 kernel，但其中也有些作業系統功能是以 user-level 伺服器執行的（例如視窗系統）。 Linux 能為作業系統密集型的應用提供高效能環境，有部分就是因為 kernel 子系統之間可以高度整合
+在現實世界中，單體 kernel 與微 kernel 這兩種架構都很流行。 許多 Unix kernel 採用單體架構，例如 Linux 就是一個單體 kernel，但其中也有些作業系統功能是以 user-level 伺服器執行的（例如視窗系統）。 Linux 能為作業系統密集型的應用提供高效能環境，有部分就是因為 kernel 子系統之間可以高度整合
 
 像 Minix、L4 以及 QNX 等作業系統採用了微 kernel 加伺服器的架構，並且在嵌入式環境中被廣泛使用。 L4 的一個變種「seL4」甚至小到足以被形式化驗證其記憶體安全性與其他安全特性<sup>[[1]](#1)</sup>。 作業系統開發者之間對於哪種架構較佳有許多爭論，目前也沒有哪一種架構優於另一種的明確證據。 此外，這也很取決於「較佳」的定義是什麼：更高的效能、更小的程式碼體積、更可靠的 kernel、更可靠的整體作業系統（包含使用者層服務）等等
 
@@ -143,9 +143,9 @@ xv6 的 kernel 為每個行程維護許多狀態，這些狀態集中存放在 `
 
 ## 2.6 Code: starting xv6, the first process and system call
 
-為了讓 xv6 更具體易懂，我們將簡要地說明 kernel 如何啟動並執行第一個行程。 後續的章節將會更詳細地介紹本概要中提到的機制。 當 RISC-V 電腦開機時，它會先進行初始化，接著執行儲存在唯讀記憶體中的 boot loader。 boot loader 會將 xv6  kernel 載入到記憶體中。 然後，在 machine mode 下，CPU 會從 `_entry` 開始執行 xv6。 此時 RISC-V 的 paging hardware 尚未啟用，因此虛擬位址會直接對應到實體位址
+為了讓 xv6 更具體易懂，我們將簡要地說明 kernel 如何啟動並執行第一個行程。 後續的章節將會更詳細地介紹本概要中提到的機制。 當 RISC-V 電腦開機時，它會先進行初始化，接著執行儲存在唯讀記憶體中的 boot loader。 boot loader 會將 xv6 kernel 載入到記憶體中。 然後，在 machine mode 下，CPU 會從 `_entry` 開始執行 xv6。 此時 RISC-V 的 paging hardware 尚未啟用，因此虛擬位址會直接對應到實體位址
 
-boot loader 會將 xv6  kernel 載入至記憶體中的實體位址 `0x80000000`。 之所以不是放在 `0x0`，是因為從 `0x0` 到 `0x80000000` 的位址範圍被保留給了 I/O 裝置使用
+boot loader 會將 xv6 kernel 載入至記憶體中的實體位址 `0x80000000`。 之所以不是放在 `0x0`，是因為從 `0x0` 到 `0x80000000` 的位址範圍被保留給了 I/O 裝置使用
 
 `_entry` 內的指令會建立一個 stack，讓 xv6 能夠執行 C 程式碼。 xv6 在 `start.c`（[kernel/start.c:11](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/start.c#L11)）中宣告了一個初始 stack 區域 `stack0`。 `_entry` 的程式碼會將 stack 指標（`sp`）設為 `stack0 + 4096`，即 stack 頂端，因為在 RISC-V 中 stack 是向下成長的。 現在 kernel 已經有 stack 了，`_entry` 會接著呼叫位於 `start`（[kernel/start.c:15](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/start.c#L15)）的 C 函式
 
@@ -159,7 +159,7 @@ boot loader 會將 xv6  kernel 載入至記憶體中的實體位址 `0x80000000`
 
 當 `main` 初始化完若干裝置與子系統後，會透過呼叫 `userinit` 建立第一個行程。 這個第一個行程會執行一段以 RISC-V 組合語言撰寫的小程式，並發出 xv6 中的第一個系統呼叫。 `initcode.S` 會將 `exec` 系統呼叫的編號 `SYS_EXEC` 載入暫存器 `a7`，然後執行 `ecall` 指令以重新進入 kernel 
 
- kernel 會在 `syscall` 中使用暫存器 `a7` 內的數值來呼叫對應的系統呼叫。 系統呼叫表會將 `SYS_EXEC` 映射到函式 `sys_exec`，接著 kernel 會呼叫該函式。 正如我們在 UNIX 章節中所看到的，`exec` 會用新的程式（這裡是 `/init`）取代目前行程的記憶體與暫存器內容
+kernel 會在 `syscall` 中使用暫存器 `a7` 內的數值來呼叫對應的系統呼叫。 系統呼叫表會將 `SYS_EXEC` 映射到函式 `sys_exec`，接著 kernel 會呼叫該函式。 正如我們在 UNIX 章節中所看到的，`exec` 會用新的程式（這裡是 `/init`）取代目前行程的記憶體與暫存器內容
 
 一旦 kernel 執行完 `exec`，它會返回到 `/init` 行程的 user space。 `init` 會在需要時建立一個新的主控台裝置檔案，然後將其分別以檔案描述符 0、1 和 2 打開。 接著，它會在主控台上啟動一個 shell，此時，系統便已啟動完成
 
@@ -169,7 +169,7 @@ boot loader 會將 xv6  kernel 載入至記憶體中的實體位址 `0x80000000`
 
 作業系統必須假設某個行程的使用者層程式碼會盡可能地破壞 kernel 或其他行程。 使用者程式碼可能會試圖解參考超出其被允許存取的位址空間的指標； 可能會嘗試執行任何 RISC-V 指令，甚至是那些原本不給使用者程式使用的指令； 可能會試圖讀寫任何 RISC-V 控制暫存器； 可能會直接存取硬體裝置； 還可能會傳遞巧妙設計過的值給系統呼叫，企圖誘使 kernel 當機或做出愚蠢的行為
 
- kernel 的目標是限制每個使用者行程，使其只能讀取、寫入、執行它自己的使用者記憶體，只能使用 RISC-V 的 32 個通用暫存器，並且只能透過系統呼叫所允許的方式來影響 kernel 與其他行程。 kernel 必須防止任何其他行為的發生。 這通常是 kernel 設計中絕對必要的要求
+kernel 的目標是限制每個使用者行程，使其只能讀取、寫入、執行它自己的使用者記憶體，只能使用 RISC-V 的 32 個通用暫存器，並且只能透過系統呼叫所允許的方式來影響 kernel 與其他行程。 kernel 必須防止任何其他行為的發生。 這通常是 kernel 設計中絕對必要的要求
 
 對於 kernel 自身的程式碼，所抱持的期望則完全不同，kernel 程式碼被假設為由善意且謹慎的程式設計師所撰寫。 因此我們預期 kernel 程式碼是沒有錯誤的，當然也不會包含任何惡意行為。 這個假設會影響我們分析 kernel 程式碼的方式，例如，有許多內部 kernel 函式（例如 spin lock）如果被錯誤使用會造成嚴重問題
 
