@@ -23,12 +23,12 @@ xv6 的 trap 處理流程分為四個階段：第一階段是 RISC-V CPU 執行�
 
 ## 4.1 RISC-V trap machinery
 
-每個 RISC-V CPU 都有一組控制暫存器， kernel 會寫入這些暫存器以告訴 CPU 該如何處理 trap，並且 kernel 也可以讀取這些暫存器來得知 trap 的相關資訊，RISC-V 的官方文件中有完整的說明<sup>[[1]](#1)</sup>。 riscv.h（[kernel/riscv.h:1](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/riscv.h#L1)）中包含了 xv6 使用的相關定義。 以下是幾個最重要的暫存器簡介：
+每個 RISC-V CPU 都有一組控制暫存器，kernel 會寫入這些暫存器以告訴 CPU 該如何處理 trap，並且 kernel 也可以讀取這些暫存器來得知 trap 的相關資訊，RISC-V 的官方文件中有完整的說明<sup>[[1]](#1)</sup>。 riscv.h（[kernel/riscv.h:1](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/riscv.h#L1)）中包含了 xv6 使用的相關定義。 以下是幾個最重要的暫存器簡介：
 
 - `stvec`：  
   -  kernel 會在這裡寫入 trap handler 的位址； 當發生 trap 時，RISC-V 會跳到 `stvec` 所指定的位址執行處理該 trap 的 handler
 - `sepc`：  
-  - 當發生 trap 時，RISC-V 會將當下的程式計數器（`pc`）儲存在此處（因為 `pc` 隨即會被 `stvec` 的值覆蓋）。 `sret`（從 trap 返回的指令）會將 `sepc` 的內容複製回 `pc`。  kernel 也可以透過寫入 `sepc` 來控制 `sret` 返回的位置
+  - 當發生 trap 時，RISC-V 會將當下的程式計數器（`pc`）儲存在此處（因為 `pc` 隨即會被 `stvec` 的值覆蓋）。 `sret`（從 trap 返回的指令）會將 `sepc` 的內容複製回 `pc`。 kernel 也可以透過寫入 `sepc` 來控制 `sret` 返回的位置
 - `scause`：  
   - RISC-V 會在此處寫入一個數值，描述這次 trap 的原因
 - `sscratch`：  
@@ -57,7 +57,7 @@ xv6 的 trap 處理流程分為四個階段：第一階段是 RISC-V CPU 執行�
 
 xv6 會根據 trap 發生時是在 kernel 中還是 user code 中執行而採取不同的處理方式。 這段會講述從 user code 發出的 trap 的流程； 至於 kernel code 發出的 trap，則會在第 4.5 節中說明
 
-當執行緒正在 user space 執行時，如果 user program 發出系統呼叫（透過 `ecall` 指令）、做了不合法的操作，或有裝置中斷發生，就可能會發生 trap。 從 user space 發出的 trap，其高階的處理路徑為：先進入 `uservec`（ [kernel/trampoline.S:22](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/trampoline.S#L22)），接著進入 `usertrap`（[kernel/trap.c:37](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/trap.c#L37)）； 處理完後要返回 user space 時，會先經過 `usertrapret`（[kernel/trap.c:90](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/trap.c#L90)），最後再透過 `userret`（[kernel/trampoline.S:101](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/trampoline.S#L101)）回到 user program
+當執行緒正在 user space 執行時，如果 user program 發出系統呼叫（透過 `ecall` 指令）、做了不合法的操作，或有裝置中斷發生，就可能會發生 trap。 從 user space 發出的 trap，其高階的處理路徑為：先進入 `uservec`（[kernel/trampoline.S:22](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/trampoline.S#L22)），接著進入 `usertrap`（[kernel/trap.c:37](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/trap.c#L37)）； 處理完後要返回 user space 時，會先經過 `usertrapret`（[kernel/trap.c:90](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/trap.c#L90)），最後再透過 `userret`（[kernel/trampoline.S:101](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/trampoline.S#L101)）回到 user program
 
 xv6 的 trap 處理機制在設計上有個主要限制：RISC-V 硬體在觸發 trap 時並不會自動切換 page table。 這表示 `stvec` 中指向的 trap handler 位址，必須在 user page table 中有一個有效的映射，因為 trap 發生時仍是使用 user 的 page table 來執行。 此外，xv6 的 trap handler 還需要切換到 kernel 的 page table； 而為了讓 trap handler 在切換後能繼續執行，kernel page table 也必須對 `stvec` 所指向的 handler 有一份映射
 
