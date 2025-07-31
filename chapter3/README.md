@@ -87,7 +87,7 @@ start()
 }
 ```
 
-但「kernel 透過 direct mapping 的方式來存取 RAM 與 memory-mapped 的裝置暫存器」這句話，並不是在指 Bare mode。 它說的是在初始化 kernel page table 的時候，他會「手動」依照 Sv39 的格式，將 VA 映射到與其相同位址的 PA。 因此在後面已啟用 Sv39 的環境下，你把拿到的 VA 以 Sv39 的規則去查 kernel page table 時，最後得出的 VA 還是會剛好等於 PA（除了之前提到的 trampoline page 之類的）
+但「kernel 透過 direct mapping 的方式來存取 RAM 與 memory-mapped 的裝置暫存器」這句話，並不是在指 Bare mode。 它說的是在初始化 kernel page table 的時候，他會「手動」依照 Sv39 的格式，將 VA 映射到與其相同位址的 PA。 因此在後面已啟用 Sv39 的環境下，你把拿到的 VA 以 Sv39 的規則去查 kernel page table 時，最後得出的 PA 還是會剛好等於 VA（除了之前提到的 trampoline page 之類的）
 
 以 uart register 為例，他在 kernel page table 中被這麼初始化：
 
