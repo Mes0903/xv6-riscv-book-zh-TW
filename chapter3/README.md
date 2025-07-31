@@ -72,24 +72,22 @@ kernel 透過「直接映射（direct mapping）」的方式來存取 RAM 與 me
 
 kernel 將 trampoline page 與 kernel 程式碼的 page 設置為具有 `PTE_R` 與 `PTE_X` 的權限，這表示 kernel 可以在這些 page 上讀取並執行指令。 其他 page 則被設置為具有 `PTE_R` 與 `PTE_W` 的權限，以便 kernel 能夠對這些 page 進行讀寫。 至於 guard page，則被設為無效映射
 
-## 3.3 Code: creating an address space
-
-xv6 中大多數負責操作位址空間與 page table 的程式碼都寫在 vm.c（[kernel/vm.c:1](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/vm.c#L1)）中。 主要的資料結構是 `pagetable_t`，它實際上是一個指向 RISC-V root page table 的 page 的指標。 `pagetable_t` 的實例可能是 kernel 的 page table，也可能是某個行程的 page table。 相關的主要函式有 `walk` 與 `mappages`，前者用來找出某個虛擬位址對應的 PTE，後者會為新的映射關係建立對應的 PTE
-
-以 `kvm` 開頭的函式會操作 kernel 的 page table； 以 `uvm` 開頭的函式會操作 user 的 page table； 其他函式則可能同時用於兩者。 `copyout` 與 `copyin` 用來從系統呼叫的引數提供的使用者虛擬位址中複製資料進出，這兩個函式之所以寫在 vm.c 裡，是因為它們必須顯式地將虛擬位址轉換成對應的物理位址
-
-在開機流程的早期，`main` 會呼叫 `kvminit`，透過 `kvmmake` 建立 kernel 的 page table。 這個呼叫發生在 xv6 尚未啟用 RISC-V 的 paging 功能之前，因此當時的位址仍直接對應到實體記憶體。 `kvmmake` 會先分配一個 page 的實體記憶體作為 root page table，接著呼叫 `kvmmap` 來設置 kernel 所需的映射關係。 這些映射包含了 kernel 的程式與資料、本機到 `PHYSTOP` 為止的實體記憶體，以及實際上是裝置的某些記憶體區段。 `proc_mapstacks` 為每個行程配置一個 kernel stack，它會呼叫 `kvmmap`，把每個 stack 映射到由 `KSTACK` 產生的虛擬位址，同時為無效的 guard page 預留空間
-
-`kvmmap`（[kernel/vm.c:132](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/vm.c#L132)）會呼叫 `mappages`（[kernel/vm.c:144](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/vm.c#L144)），針對目標範圍內的每個虛擬位址，以 page 大小為間格，將其映射關係加入到 page table 中。 對於每個要映射的虛擬位址，`mappages` 會呼叫 `walk` 找到該位址對應的 PTE，然後初始化這個 PTE，填入對應的 PPN、所需的存取權限（例如 `PTE_W`、`PTE_X` 或 `PTE_R`），並設置 `PTE_V` 將該 PTE 標記為有效 page 
-
-`walk`（[kernel/vm.c:86](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/vm.c#L86)）模擬 RISC-V paging hardware 的行為，用來查找某個虛擬位址對應的 PTE。 `walk` 一次會往下走訪一層 page table，並使用該層虛擬位址的 9 個位元來索引對應的 page table。 在每一層 page table 當中，它可能會找到下一層 page table 的 PTE，或者是最終 page 的 PTE（[kernel/vm.c:92](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/vm.c#L92)）。 如果第一層或第二層的 page table 中的 PTE 無效，表示該層的 page 尚未配置； 如果設置了 `alloc` 引數，`walk` 就會為新 page table 配置一個新的 page，並把它的實體位址寫入該 PTE。 最終 `walk` 會回傳樹中最底層那個 PTE 的位址（[kernel/vm.c:102](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/vm.c#L102)）
-
-上述的程式碼只能在實體記憶體已被直接映射到 kernel 的虛擬位址空間內的情況下執行。 例如，當 `walk` 向下走訪 page table 時，它會從某個 PTE 中取得下一層 page table 的實體位址（[kernel/vm.c:94](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/vm.c#L94)），然後把這個位址當作虛擬位址使用，來存取下一層的 PTE（[kernel/vm.c:92](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/vm.c#L92)）
-
-`main` 會呼叫 `kvminithart`（[kernel/vm.c:62](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/vm.c#L62)）來載入 kernel 的 page table，這個函式會將 root page table 的 page 的實體位址寫入暫存器 `satp`，之後 CPU 就會開始使用這份 kernel 的 page table 來進行位址轉譯。 由於 kernel 使用的是直接映射，接下來的指令所使用的虛擬位址將會正確地映射到對應的實體記憶體位址上
-
 ::: tip  
-雖然 kernel page table 是以 direct mapping 初始化的，這並不代表其是使用 Bare Mode 在做 paging，而是指你將拿到的 VA 以 Sv39 的規則去查 kernel page table 時，最後得出的 VA 會剛好等於 PA
+kernel 一開始使用的是 Bare Mode（`satp.MODE == 0`）：
+
+```c
+// entry.S jumps here in machine mode on stack0.
+void
+start()
+{
+  ...
+  // disable paging for now.
+  w_satp(0);
+  ...
+}
+```
+
+但「kernel 透過 direct mapping 的方式來存取 RAM 與 memory-mapped 的裝置暫存器」這句話，並不是在指 Bare mode。 它說的是在初始化 kernel page table 的時候，他會「手動」依照 Sv39 的格式，將 VA 映射到與其相同位址的 PA。 因此在後面已啟用 Sv39 的環境下，你把拿到的 VA 以 Sv39 的規則去查 kernel page table 時，最後得出的 VA 還是會剛好等於 PA（除了之前提到的 trampoline page 之類的）
 
 以 uart register 為例，他在 kernel page table 中被這麼初始化：
 
@@ -124,7 +122,17 @@ kvmmap(pagetable_t kpgtbl, uint64 va, uint64 pa, uint64 sz, int perm)
 }
 ```
 
-因此你可以看見，在其傳入 `kvmmap` 的參數中，`va` 與 `pa` 是直接寫了相同的值 `UART0`，這就是 direct mapping 的意思。 而 `mappages` 會利用 `walk` 來判斷你給的參數 `va` 在 kernel page table 中是否已經被映射了：
+因此你可以看見，在其傳入 `kvmmap` 的參數中，`va` 與 `pa` 是直接寫了相同的值 `UART0`，這就是 direct mapping 的意思。 上方是 mmap 裝置的初始化，而對於 RAM 也是：
+
+```c
+// map kernel text executable and read-only.
+kvmmap(kpgtbl, KERNBASE, KERNBASE, (uint64)etext-KERNBASE, PTE_R | PTE_X);
+
+// map kernel data and the physical RAM we'll make use of.
+kvmmap(kpgtbl, (uint64)etext, (uint64)etext, PHYSTOP-(uint64)etext, PTE_R | PTE_W);
+```
+
+這兩行就把整個 Physical memory 都包含進來了（`KERNBASE` 至 `PHYSTOP`，見圖 3.3）。 而 `kvmmap` 內的 `mappages` 會利用 `walk` 來判斷你給的參數 `va` 在 kernel page table 中是否已經被映射了：
 
 ```c
 // Create PTEs for virtual addresses starting at va that refer to
@@ -200,8 +208,35 @@ walk(pagetable_t pagetable, uint64 va, int alloc)
 }
 ```
 
-也因此 kernel page table 一樣有三層  
+也因此 kernel page table 一樣有三層，才可以依照 Sv39 的格式去查表。  再來對於 trampoline page 和 per-process 的 kernel stack，他又另外做了一次映射，但卻不是以 direct mapping 的方式：
+
+```c
+// map the trampoline for trap entry/exit to
+// the highest virtual address in the kernel.
+kvmmap(kpgtbl, TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
+
+// allocate and map a kernel stack for each process.
+proc_mapstacks(kpgtbl);
+```
+
+因此上面才說這兩個東西可以用高位的虛擬位址來訪問，也可以走 direct mapping 的路線  
 :::
+
+## 3.3 Code: creating an address space
+
+xv6 中大多數負責操作位址空間與 page table 的程式碼都寫在 vm.c（[kernel/vm.c:1](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/vm.c#L1)）中。 主要的資料結構是 `pagetable_t`，它實際上是一個指向 RISC-V root page table 的 page 的指標。 `pagetable_t` 的實例可能是 kernel 的 page table，也可能是某個行程的 page table。 相關的主要函式有 `walk` 與 `mappages`，前者用來找出某個虛擬位址對應的 PTE，後者會為新的映射關係建立對應的 PTE
+
+以 `kvm` 開頭的函式會操作 kernel 的 page table； 以 `uvm` 開頭的函式會操作 user 的 page table； 其他函式則可能同時用於兩者。 `copyout` 與 `copyin` 用來從系統呼叫的引數提供的使用者虛擬位址中複製資料進出，這兩個函式之所以寫在 vm.c 裡，是因為它們必須顯式地將虛擬位址轉換成對應的物理位址
+
+在開機流程的早期，`main` 會呼叫 `kvminit`，透過 `kvmmake` 建立 kernel 的 page table。 這個呼叫發生在 xv6 尚未啟用 RISC-V 的 paging 功能之前，因此當時的位址仍直接對應到實體記憶體。 `kvmmake` 會先分配一個 page 的實體記憶體作為 root page table，接著呼叫 `kvmmap` 來設置 kernel 所需的映射關係。 這些映射包含了 kernel 的程式與資料、本機到 `PHYSTOP` 為止的實體記憶體，以及實際上是裝置的某些記憶體區段。 `proc_mapstacks` 為每個行程配置一個 kernel stack，它會呼叫 `kvmmap`，把每個 stack 映射到由 `KSTACK` 產生的虛擬位址，同時為無效的 guard page 預留空間
+
+`kvmmap`（[kernel/vm.c:132](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/vm.c#L132)）會呼叫 `mappages`（[kernel/vm.c:144](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/vm.c#L144)），針對目標範圍內的每個虛擬位址，以 page 大小為間格，將其映射關係加入到 page table 中。 對於每個要映射的虛擬位址，`mappages` 會呼叫 `walk` 找到該位址對應的 PTE，然後初始化這個 PTE，填入對應的 PPN、所需的存取權限（例如 `PTE_W`、`PTE_X` 或 `PTE_R`），並設置 `PTE_V` 將該 PTE 標記為有效 page 
+
+`walk`（[kernel/vm.c:86](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/vm.c#L86)）模擬 RISC-V paging hardware 的行為，用來查找某個虛擬位址對應的 PTE。 `walk` 一次會往下走訪一層 page table，並使用該層虛擬位址的 9 個位元來索引對應的 page table。 在每一層 page table 當中，它可能會找到下一層 page table 的 PTE，或者是最終 page 的 PTE（[kernel/vm.c:92](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/vm.c#L92)）。 如果第一層或第二層的 page table 中的 PTE 無效，表示該層的 page 尚未配置； 如果設置了 `alloc` 引數，`walk` 就會為新 page table 配置一個新的 page，並把它的實體位址寫入該 PTE。 最終 `walk` 會回傳樹中最底層那個 PTE 的位址（[kernel/vm.c:102](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/vm.c#L102)）
+
+上述的程式碼只能在實體記憶體已被直接映射到 kernel 的虛擬位址空間內的情況下執行。 例如，當 `walk` 向下走訪 page table 時，它會從某個 PTE 中取得下一層 page table 的實體位址（[kernel/vm.c:94](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/vm.c#L94)），然後把這個位址當作虛擬位址使用，來存取下一層的 PTE（[kernel/vm.c:92](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/vm.c#L92)）
+
+`main` 會呼叫 `kvminithart`（[kernel/vm.c:62](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/vm.c#L62)）來載入 kernel 的 page table，這個函式會將 root page table 的 page 的實體位址寫入暫存器 `satp`，之後 CPU 就會開始使用這份 kernel 的 page table 來進行位址轉譯。 由於 kernel 使用的是直接映射，接下來的指令所使用的虛擬位址將會正確地映射到對應的實體記憶體位址上
 
 每顆 RISC-V CPU 都會將 PTE 快取在 TLB（Translation Look-aside Buffer）中，而當 xv6 修改 page table 時，它必須通知 CPU 將對應的 TLB 快取項目作廢。 否則之後 TLB 可能會使用到過時的快取映射，進而指向一個已經被分配給其他行程的 page frame，導致某個行程不小心寫入其他行程的記憶體
 
@@ -305,7 +340,7 @@ Program Header:
 
 xv6 採取了一些檢查措施以避免這些風險。 例如，使用者可以製作一個 ELF 檔，讓 `ph.vaddr` 指向一個任意位址，並給 `ph.memsz` 一個足夠大的值，讓相加結果發生溢位並變成像 `0x1000` 這樣看似合理的值。 xv6 使用 `if(ph.vaddr + ph.memsz < ph.vaddr)` 來檢查這兩者相加時是否發生 64 位元整數溢位，以達到防禦的效果
 
-在舊版的 xv6 中，使用者位址空間也包含了 kernel（雖然在 user mode 中無法讀寫），使用者可以選擇一個對應到 kernel 記憶體的位址，這樣 ELF 檔的資料就會被複製進 kernel 。 這在 RISC-V 版本的 xv6 中不會發生，因為 kernel 擁有獨立的 page table； `loadseg` 會將資料載入行程的 page table，而非 kernel 的 page table 
+在舊版的 xv6 中，使用者位址空間也包含了 kernel（雖然在 user mode 中無法讀寫），使用者可以選擇一個對應到 kernel 記憶體的位址，這樣 ELF 檔的資料就會被複製進 kernel。 這在 RISC-V 版本的 xv6 中不會發生，因為 kernel 擁有獨立的 page table； `loadseg` 會將資料載入行程的 page table，而非 kernel 的 page table 
 
 對於 kernel 開發者來說，很容易會遺漏關鍵地檢查。 實際上在 kernel 發展歷史中，常常會因為檢查不足而讓使用者程式得以利用漏洞獲得 kernel 權限。 xv6 很可能也沒有完全驗證由使用者層傳入 kernel 的資料，這可能會被惡意的使用者程式加以利用，來繞過 xv6 的隔離機制
 

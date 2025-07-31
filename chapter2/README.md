@@ -45,7 +45,7 @@ CPU 提供了實現強隔離的硬體支援。 例如，RISC-V 擁有三種 CPU 
 
 第一章中的圖 1.1 說明了這種架構，應用程式只能執行 user-mode 的指令（例如加法等），稱為在 user space（user space）中執行； 而 supervisor mode 的軟體則還能執行特權指令，稱為在 kernel space 中執行。 執行於 kernel space（或 supervisor mode）的軟體被稱為 kernel 
 
-應用程式無法直接呼叫 kernel 函式，若其想要呼叫某個 kernel 功能（例如 xv6 中的 `read` 系統呼叫），則必須轉移至 kernel 。 CPU 提供了一條特殊的指令，用來將 CPU 從 user mode 切換到 supervisor mode，並從由 kernel 指定的進入點進入 kernel（RISC-V 提供的 `ecall` 指令就是為此目的而設計的）
+應用程式無法直接呼叫 kernel 函式，若其想要呼叫某個 kernel 功能（例如 xv6 中的 `read` 系統呼叫），則必須轉移至 kernel。 CPU 提供了一條特殊的指令，用來將 CPU 從 user mode 切換到 supervisor mode，並從由 kernel 指定的進入點進入 kernel（RISC-V 提供的 `ecall` 指令就是為此目的而設計的）
 
 一旦 CPU 切換到 supervisor mode，kernel 便能驗證該系統呼叫的引數（例如檢查傳入的記憶體位址是否屬於應用程式的範圍），決定應用程式是否有權執行該操作（例如檢查應用程式是否有權寫入指定檔案），然後決定是要拒絕還是執行該請求。 由 kernel 控制切換到 supervisor mode 的進入點是非常重要的，如果應用程式能夠自行決定 kernel 的進入點，惡意應用就可能從繞過引數驗證的位置進入 kernel 
 
