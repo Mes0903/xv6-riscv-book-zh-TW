@@ -37,6 +37,64 @@ xv6 的 shell 會透過一個由 `init.c` 所開啟的 file descriptor（[user/i
 
 當輸入遇到 newline 時，`consoleintr` 會喚醒等待中的 `consoleread`（如果有的話）。 一旦被喚醒，`consoleread` 就會發現 `cons.buf` 中已經有一整行輸入，接著它會把這行資料複製到 user space，然後透過 system call 的機制將控制權返回給 user space
 
+## 5.2 Code: Console output
+
+對已連接到 console 的 file descriptor 所做的 `write` system call，最終會到達 `uartputc`（[kernel/uart.c:87](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/uart.c#L87)）。 driver 維護了一個輸出緩衝區（`uart_tx_buf`），使得執行寫入的 process 不需要等待 UART 傳送完畢； 相反地，`uartputc` 會將每個字元加入緩衝區，然後呼叫 `uartstart` 來啟動 UART 的傳送（如果尚未開始的話），接著就直接返回。 只有當緩衝區滿了的情況下 `uartputc` 才會停下來等待
+
+每當 UART 傳送完一個 byte，它就會產生一個中斷。 `uartintr` 會呼叫 `uartstart`，這個函式會檢查 UART 是否真的完成傳送，然後把下一個緩衝區中的輸出字元交給 UART 傳送。 因此，如果某個 process 一次寫入多個 byte 到 console，通常第一個 byte 是由 `uartputc` 呼叫 `uartstart` 傳送出去的，其餘在緩衝區裡的 byte 則會由 `uartintr` 在每次中斷到來時持續呼叫 `uartstart` 傳送出去
+
+通常我們會利用「緩衝區」與「中斷」來讓「裝置活動」與【process 活動」解耦。 即使沒有 process 正等著要讀資料，console driver 也能先處理輸入，因此之後的 `read` 呼叫仍然能讀到這些資料。 同樣地，process 也能夠直接輸出資料，而不用等待裝置完成傳送。 這種解耦能提升效能，因為它允許 process 在進行裝置 I/O 的同時繼續執行，而當裝置速度很慢（像 UART）或需要即時反應（像 echo 指定字元）時，這點特別重要。 這種設計理念有時被稱為 I/O 並行（I/O concurrency）
+
+## 5.3 Concurrency in drivers
+
+你可能已經注意到在 `consoleread` 和 `consoleintr` 中有呼叫 `acquire`，這些呼叫會取得鎖，以保護 console driver 的資料結構不被並行存取。 在這裡有三種並行風險：第一是兩個不同 CPU 上的 process 可能同時呼叫 `consoleread`； 第二是硬體可能在某個 CPU 執行 `consoleread` 時觸發 console（實際上是 UART）中斷，打斷該 CPU； 最後是中斷可能發生在另一個 CPU 上，而此時某個 CPU 正在執行 `consoleread`。 第六章會說明如何使用鎖來避免這些情況導致錯誤結果
+
+driver 在處理並行時還有另一個需要注意的情況，那就是某個 process 可能正在等待某個裝置的輸入，但用來通知輸入到達的中斷可能是在另一個 process（或根本沒有 process）執行時產生的。 因此，interrupt handler 無法預期它中斷的 process 或程式碼是什麼，例如 interrupt handler 無法直接使用當前 process 的 page table 去呼叫 `copyout`。 通常 interrupt handler 只會做一些簡單的工作（例如將輸入資料複製到緩衝區），然後喚醒 top-half 的程式碼來完成後續處理
+
+::: tip  
+interrupt handler 不能依賴於當前 CPU 所執行的 context，因為它可能與觸發中斷的真正程式無關。 這是因為：
+
+- 中斷可能在任意時間點、任意 CPU 上發生
+- 沒有保證當前在執行的就是那個等待輸入的 process。 所以 interrupt handler 常只做 minimal 的事（如複製資料進 buffer），然後喚醒後續能正確處理的程式碼。這就是 top-half / bottom-half 設計的意義  
+:::
+
+## 5.4 Timer interrupts
+
+xv6 使用 timer interrupt 來維持系統對「目前時間」的認知，並在多個 compute-bound 的 process 之間進行切換。 timer interrupt 由接在每個 RISC-V CPU 上的時鐘硬體所產生，xv6 會設定每個 CPU 的時鐘硬體，讓它定期對該 CPU 產生中斷
+
+start.c 中的程式碼（[kernel/start.c:53](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/start.c#L53)）會設定一些控制用的 bit，使 supervisor mode 可以存取 timer 控制暫存器，接著會請求第一個 timer interrupt。 `time` 控制暫存器會以固定速率自動遞增，這提供了「目前時間」的概念。 `stimecmp` 暫存器中則存放一個時間點，當 `time` 遞增到該時間點時，CPU 就會產生 timer interrupt。 換句話說，如果將 `stimecmp` 設為 `time` 加上某個值 `x`，就表示在 `x` 個時間單位之後會產生一個 interrupt。 對於 QEMU 的 RISC-V 模擬器來說，1000000 個時間單位大約等於 0.1 秒
+
+timer interrupt 會像其他裝置中斷一樣，經由 `usertrap` 或 `kerneltrap` 和 `devintr` 傳送進來。 timer interrupt 發生時，`scause` 的低位元會被設為 5； trap.c 中的 `devintr` 偵測到這種情況時，會呼叫 `clockintr`（[kernel/trap.c:164](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/trap.c#L164)）。 `clockintr` 會將 ticks 遞增，以讓 kernel 能夠追蹤時間流逝，這個遞增動作只會在其中一個 CPU 上執行，以避免多個 CPU 同時讓時間變快。 `clockintr` 也會喚醒那些正在 `sleep` 系統呼叫中等待的 process，並寫入新的 `stimecmp` 值來排程下一次的 timer interrupt
+
+`devintr` 若遇到 timer interrupt，會回傳 2，以通知 `kerneltrap` 或 `usertrap` 應該呼叫 `yield`，從而讓 CPU 能夠在多個可執行的 process 之間進行切換
+
+kernel 程式碼可能會在執行期間被 timer interrupt 打斷，並因為 `yield` 而進行 context switch，這也是為什麼 `usertrap` 初期的程式碼會小心地先儲存像 `sepc` 這類的狀態，然後才開啟中斷。 這也意味著在撰寫 kernel 程式碼時必須考慮到會有這類 context switch 發生，它可能會在沒有預警的情況下從某個 CPU 被切換到另一個 CPU 上執行
+
+## 5.5 Real world
+
+和許多作業系統一樣，xv6 在 kernel 執行期間也允許中斷發生，甚至允許透過 `yield` 進行 context switch。 這麼做的原因是希望即使在執行一些耗時且複雜的系統呼叫時，也能維持良好的反應速度。 不過，如前所述，在 kernel 中允許中斷也會導入一些額外的複雜性； 因此，有些作業系統選擇只在執行 user code 時才允許中斷
+
+要完整支援一台典型電腦上所有裝置，是一件非常繁瑣的事，因為裝置種類繁多，每個裝置又有很多功能，而且裝置與 driver 之間的通訊協定往往很複雜，甚至缺乏良好文件。 在許多作業系統中，driver 的程式碼量往往超過了核心 kernel 本身
+
+UART driver 是透過讀取 UART 控制暫存器，每次取回一個 byte 的方式來取得資料的； 因為是由軟體主動驅動資料搬移的，所以這種模式稱為「programmed I/O」。 programmed I/O 實作簡單，但速度太慢，不適合高資料速率的應用。 需要高速搬移大量資料的裝置通常會使用 direct memory access（DMA）的方式，例如現代的硬碟與網路裝置都使用 DMA。 DMA 裝置硬體會直接把接收到的資料寫入 RAM，也會從 RAM 中讀取要傳送的資料。 對於 DMA 裝置而言，driver 會先在 RAM 中準備好資料，然後只需寫一次控制暫存器來告訴裝置處理這些資料即可
+
+當無法預測裝置需要處理的時間點，但其頻率又不太高時，使用中斷是合理的。 但中斷的 CPU 成本很高，因此像網路或硬碟這種高速裝置會使用一些技巧來減少中斷需求。 一種技巧是針對一整批收送請求只產生一次中斷。 另一種技巧則是完全關掉中斷，由 driver 定期檢查裝置是否需要處理，這種技巧稱為 polling。 polling 適用於裝置操作頻率很高的情況，但若裝置大多時間閒置，polling 會浪費大量 CPU 資源。 有些 driver 會根據裝置目前的負載，動態地在 polling 和中斷兩種模式之間切換
+
+UART driver 會先將收到的資料複製到 kernel 的緩衝區，再複製到 user space。 這樣的作法在低資料速率的環境下是合理的，但對於產生或消耗資料速度很快的裝置，這樣的兩次複製會顯著影響效能。 有些作業系統能夠直接在 user-space buffer 和裝置硬體之間搬移資料，這通常需要透過 DMA 來完成
+
+如第一章所述，console 在應用程式看來就像是一般的檔案，應用程式會使用 `read` 和 `write` 系統呼叫來進行輸入與輸出。 不過，有些裝置功能無法透過標準的檔案系統呼叫來表示（例如，開啟或關閉 console driver 的 line buffer）。 Unix 作業系統會提供 `ioctl` 系統呼叫來處理這類情況
+
+有些電腦用途要求系統必須在固定時間內做出反應。 例如在重視安全性的系統中，錯過期限可能會導致災難。 xv6 不適合用在硬即時（hard real-time）的情境，硬即時系統的作業系統通常會以函式庫的形式與應用程式連結，讓系統能分析出最壞情況的反應時間 。xv6 也不適合用於軟即時（soft real-time）應用，也就是偶爾錯過期限可以接受的情境，因為 xv6 的排程器太過簡單，而且有些 kernel 的程式路徑會在長時間內關閉中斷
+
+::: tip  
+硬即時系統（例如醫療、飛控）要求絕不能 miss deadline，而軟即時系統（例如影音播放）容許偶爾 miss，但仍要求反應快。 但 xv6 的排程器過於簡單，且某些 kernel 區段會 disable interrupt 太久，這讓它無法保證 deadline，故兩種都不適合  
+:::
+
+## 5.6 Exercises
+
+1. 修改 `uart.c`，讓它完全不使用中斷。 你可能也需要修改 `console.c`
+2. 為網卡新增一個 driver
+
 ## Bibliography
 
 - <a id="1">[1]</a>：Martin Michael and Daniel Durich. The NS16550A: UART design and application considerations. http://bitsavers.trailing-edge.com/components/national/_appNotes/AN-0491.pdf, 1987.
