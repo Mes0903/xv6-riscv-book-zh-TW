@@ -5,6 +5,7 @@
 - [x] （9~20, 12p）Chapter 1：Operating system interfaces
 - [x] （21~30, 10p）Chapter 2：Operating system organization
 - [x] （31~42, 12p）Chapter 3：Page tables
+- [x] （43~52, 10p）Chapter4：Traps and system calls
 - [x] （53~58, 6p）Chapter 5：Interrupts and device drivers
 - [ ] （59~70, 12p）Chapter 6：Locking
 - [ ] （71~84, 14p）Chapter 7：Scheduling
