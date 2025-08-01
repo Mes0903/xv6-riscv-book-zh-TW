@@ -169,47 +169,47 @@ proc_pagetable(struct proc *p)
 
 ## 4.3 Code: Calling system calls
 
-第二章最後提到了 `initcode.S` 會呼叫 `exec` 這個系統呼叫[（user/initcode.S:11）](https://github.com/mit-pdos/xv6-riscv/blob/riscv//user/initcode.S#L11)。 現在我們來看看，這個來自 user space 的呼叫，是怎麼一路傳遞到 kernel 中對應的 `exec` 實作的
+第二章最後提到了 `initcode.S` 會呼叫 `exec` 這個系統呼叫（[user/initcode.S:11](https://github.com/mit-pdos/xv6-riscv/blob/riscv//user/initcode.S#L11)）。 現在我們來看看，這個來自 user space 的呼叫，是怎麼一路傳遞到 kernel 中對應的 `exec` 實作的
 
-`initcode.S` 會把傳給 `exec` 的引數放進 `a0` 和 `a1` 暫存器中，並將系統呼叫的編號放進 `a7`。 系統呼叫編號會對應到 `syscalls` 陣列中的條目，這個陣列是一張函式指標的列表 [（kernel/syscall.c:107）](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/syscall.c#L107)。 接著 `ecall` 指令會觸發 trap 進入 kernel，如前所述，這會依序執行 `uservec`、`usertrap` 與 `syscall`
+`initcode.S` 會把傳給 `exec` 的引數放進 `a0` 和 `a1` 暫存器中，並將系統呼叫的編號放進 `a7`。 系統呼叫編號會對應到 `syscalls` 陣列中的條目，這個陣列是一張函式指標的列表 （[kernel/syscall.c:107](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/syscall.c#L107)）。 接著 `ecall` 指令會觸發 trap 進入 kernel，如前所述，這會依序執行 `uservec`、`usertrap` 與 `syscall`
 
-`syscall`[（kernel/syscall.c:132）](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/syscall.c#L132)會從 `trapframe` 中儲存的 `a7` 讀出系統呼叫編號，並利用它去查找 `syscalls` 陣列。 第一次的系統呼叫中，`a7` 裡會放 `SYS_exec`[（kernel/syscall.h:8）](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/syscall.h#L8)，因此會呼叫到對應的實作函式 `sys_exec`
+`syscall`（[kernel/syscall.c:132）](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/syscall.c#L132)會從 `trapframe` 中儲存的 `a7` 讀出系統呼叫編號，並利用它去查找 `syscalls` 陣列。 第一次的系統呼叫中，`a7` 裡會放 `SYS_exec`（[kernel/syscall.h:8](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/syscall.h#L8)），因此會呼叫到對應的實作函式 `sys_exec`
 
 當 `sys_exec` 執行完畢並返回時，`syscall` 會把它的回傳值寫進 `p->trapframe->a0`。 這樣做的原因是，在 RISC-V 的 C 呼叫慣例中，回傳值會放在 `a0`，因此這樣可以讓原本 user space 中的 `exec()` 呼叫收到正確的回傳值。 慣例上，系統呼叫若發生錯誤會回傳負數，成功則是 0 或正數。 若系統呼叫編號不合法，`syscall` 會印出錯誤訊息，並回傳 -1
 
 ## 4.4 Code: System call arguments
 
-kernel 中的系統呼叫實作需要取得 user code 所傳入的引數，由於 user code 會透過包裝函式來使用系統呼叫，這些引數一開始會依據 RISC-V 的 C 呼叫慣例放在暫存器中。 kernel 的 trap 處理流程會將使用者暫存器的內容儲存到目前 process 的 trapframe 中，讓 kernel code 之後可以從那裡找到它。 kernel 提供了 `argint`、`argaddr` 和 `argfd` 等函式，分別可用來從 trapframe 中讀取第 `n` 個系統呼叫的引數，並將其作為整數、指標或檔案描述符使用。 這些函式內部都會呼叫 `argraw`，以取得對應的使用者暫存器[（kernel/syscall.c:34）](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/syscall.c#L34)
+kernel 中的系統呼叫實作需要取得 user code 所傳入的引數，由於 user code 會透過包裝函式來使用系統呼叫，這些引數一開始會依據 RISC-V 的 C 呼叫慣例放在暫存器中。 kernel 的 trap 處理流程會將使用者暫存器的內容儲存到目前 process 的 trapframe 中，讓 kernel code 之後可以從那裡找到它。 kernel 提供了 `argint`、`argaddr` 和 `argfd` 等函式，分別可用來從 trapframe 中讀取第 `n` 個系統呼叫的引數，並將其作為整數、指標或檔案描述符使用。 這些函式內部都會呼叫 `argraw`，以取得對應的使用者暫存器（[kernel/syscall.c:34](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/syscall.c#L34)）
 
 有些系統呼叫會將指標作為引數傳入，而 kernel 必須使用這些指標去讀寫 user memory。 舉例來說，`exec`系統呼叫會傳給 kernel 一個陣列，裡面是指向 user space 中字串引數的指標。 這些指標會帶來兩個挑戰：第一是 user program 中可能有 bug 或是惡意程式碼，也可能會傳入一個無效的指標，甚至嘗試誘導 kernel 存取 kernel memory 而不是 user memory； 第二是 xv6 的 kernel page table 映射方式與 user page table 不同，因此 kernel 不能直接用一般的指令去從 user 的地址讀寫資料
 
-kernel 提供了幾個函式，以安全地從 user 給的記憶體位址讀寫資料。 例如 `fetchstr`[（kernel/syscall.c:25）](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/syscall.c#L25)，像 `exec` 這樣與檔案相關的系統呼叫會用 `fetchstr` 從 user space 讀取字串形式的檔名引數。 `fetchstr` 本身會呼叫 `copyinstr` 來完成底層的複製工作
+kernel 提供了幾個函式，以安全地從 user 給的記憶體位址讀寫資料。 例如 `fetchstr`（[kernel/syscall.c:25](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/syscall.c#L25)），像 `exec` 這樣與檔案相關的系統呼叫會用 `fetchstr` 從 user space 讀取字串形式的檔名引數。 `fetchstr` 本身會呼叫 `copyinstr` 來完成底層的複製工作
 
-`copyinstr`[（kernel/vm.c:415)）](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/vm.c#L415)會從 user page table `pagetable` 中的虛擬位址 `srcva` 複製最多 `max` 位元組的資料到 `dst`。 由於 `pagetable` 並不是目前使用中的 page table，`copyinstr` 會使用 `walkaddr`（它會呼叫 `walk`）去查詢 `srcva` 在 `pagetable` 中對應的實體位址 `pa0`
+`copyinstr`（[kernel/vm.c:415)](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/vm.c#L415)）會從 user page table `pagetable` 中的虛擬位址 `srcva` 複製最多 `max` 位元組的資料到 `dst`。 由於 `pagetable` 並不是目前使用中的 page table，`copyinstr` 會使用 `walkaddr`（它會呼叫 `walk`）去查詢 `srcva` 在 `pagetable` 中對應的實體位址 `pa0`
 
-由於 xv6 的 kernel page table 採用直接映射，這讓 `copyinstr` 可以直接從 `pa0` 複製字串到 `dst`。 `walkaddr`[（kernel/vm.c:109）](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/vm.c#L109)也會檢查使用者給的虛擬位址是否真的屬於該 process 的 user 位址空間，這樣 kernel 就不會被誘騙去讀其他記憶體。 另一個類似的函式是 `copyout`，它會把資料從 kernel 複製到 user 提供的位址
+由於 xv6 的 kernel page table 採用直接映射，這讓 `copyinstr` 可以直接從 `pa0` 複製字串到 `dst`。 `walkaddr`（[kernel/vm.c:109](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/vm.c#L109)）也會檢查使用者給的虛擬位址是否真的屬於該 process 的 user 位址空間，這樣 kernel 就不會被誘騙去讀其他記憶體。 另一個類似的函式是 `copyout`，它會把資料從 kernel 複製到 user 提供的位址
 
 ## 4.5 Traps from kernel space
 
-xv6 處理來自 kernel code 的 trap 的方式與處理 user code 的 trap 不同。 當進入 kernel 時，`usertrap` 會將 `stvec` 設定為指向 `kernelvec` 的組語程式碼[（kernel/kernelvec.S:12）](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/kernelvec.S#L12)。 由於 `kernelvec` 只有在 xv6 身處 kernel 狀態時才會被執行，所以 `kernelvec` 可以假設 `satp` 已經指向了 kernel page table，並且 stack pointer 也已經指向了一個合法的 kernel stack。 `kernelvec` 會把 32 個暫存器的值全部存入 stack 內，之後再從中還原，這樣就能讓被中斷的 kernel code 在不受干擾的情況下繼續執行
+xv6 處理來自 kernel code 的 trap 的方式與處理 user code 的 trap 不同。 當進入 kernel 時，`usertrap` 會將 `stvec` 設定為指向 `kernelvec` 的組語程式碼（[kernel/kernelvec.S:12](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/kernelvec.S#L12)）。 由於 `kernelvec` 只有在 xv6 身處 kernel 狀態時才會被執行，所以 `kernelvec` 可以假設 `satp` 已經指向了 kernel page table，並且 stack pointer 也已經指向了一個合法的 kernel stack。 `kernelvec` 會把 32 個暫存器的值全部存入 stack 內，之後再從中還原，這樣就能讓被中斷的 kernel code 在不受干擾的情況下繼續執行
 
 `kernelvec` 會將暫存器內容儲存在被中斷的 kernel thread 的 stack 上，因為這些暫存器的值本來就屬於該 thread。 這一點在 trap 導致切換到其他 thread 時特別重要，那種情況下 trap 結束後會從新 thread 的 stack 返回，而原本被中斷的 thread 的暫存器內容就安全地保留在它自己的 stack 上
 
-在將暫存器存入 stack 之後，`kernelvec` 會跳到 `kerneltrap`[（kernel/trap.c:135）](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/trap.c#L135)。 `kerneltrap` 主要用來處理兩種 trap：裝置中斷與例外狀況。 它會呼叫 `devintr`[（kernel/trap.c:185）](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/trap.c#L185)來偵測並處理裝置中斷。 如果這個 trap 不是裝置中斷，那就表示是例外，而在 xv6 的 kernel 中，只要發生例外就一律視為致命錯誤，此時 kernel 會呼叫 `panic` 並停止執行
+在將暫存器存入 stack 之後，`kernelvec` 會跳到 `kerneltrap`（[kernel/trap.c:135）](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/trap.c#L135)。 `kerneltrap` 主要用來處理兩種 trap：裝置中斷與例外狀況。 它會呼叫 `devintr`（[kernel/trap.c:185](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/trap.c#L185)）來偵測並處理裝置中斷。 如果這個 trap 不是裝置中斷，那就表示是例外，而在 xv6 的 kernel 中，只要發生例外就一律視為致命錯誤，此時 kernel 會呼叫 `panic` 並停止執行
 
 如果這次的 `kerneltrap` 是由 `timer` 中斷觸發的，而且當前執行的是某個 process 的 kernel thread（不是 scheduler thread），那 `kerneltrap` 就會呼叫 `yield`，讓其他執行緒有機會被排程執行。 之後某個執行緒會再次呼叫 `yield`，使我們原本的執行緒與它的 `kerneltrap` 再度恢復執行。 `yield` 的詳細行為會在第七章說明
 
-當 `kerneltrap` 處理完畢後，它需要返回到原本被 trap 中斷的那段程式碼。 由於 `yield` 可能已經修改了 `sepc` 和 `sstatus` 中的前一個模式，因此 `kerneltrap` 在開始時會先儲存這些暫存器，然後將它們還原並回到 `kernelvec`[（kernel/kernelvec.S:38）](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/kernelvec.S#L38)中。 `kernelvec` 會從 stack 中將原先存入的暫存器取出，然後執行 `sret` 指令，這會把 `sepc` 的值寫回 `pc`，從而回到被中斷的 kernel code
+當 `kerneltrap` 處理完畢後，它需要返回到原本被 trap 中斷的那段程式碼。 由於 `yield` 可能已經修改了 `sepc` 和 `sstatus` 中的前一個模式，因此 `kerneltrap` 在開始時會先儲存這些暫存器，然後將它們還原並回到 `kernelvec`（[kernel/kernelvec.S:38](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/kernelvec.S#L38)）中。 `kernelvec` 會從 stack 中將原先存入的暫存器取出，然後執行 `sret` 指令，這會把 `sepc` 的值寫回 `pc`，從而回到被中斷的 kernel code
 
 這邊你可以想想看，如果 `kerneltrap` 是因為 timer 中斷而呼叫了 `yield`，那 trap 是怎麼完成返回的？
 
-當某個 CPU 從 user space 進入 kernel 時，xv6 會把該 CPU 的 `stvec` 設定為 `kernelvec`； 你可以在 `usertrap` 中看到這段程式碼[（kernel/trap.c:29）](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/trap.c#L29)。 不過在 kernel 開始執行且 `stvec` 還沒改成 `kernelvec` 的這段期間，`stvec` 仍指向 `uservec`，這段期間如果發生了裝置中斷就會有問題。 所幸 RISC-V 在進入 trap 時會自動關閉中斷，而 `usertrap` 也會等到設完 `stvec` 才重新開啟中斷
+當某個 CPU 從 user space 進入 kernel 時，xv6 會把該 CPU 的 `stvec` 設定為 `kernelvec`； 你可以在 `usertrap` 中看到這段程式碼（[kernel/trap.c:29](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/trap.c#L29)）。 不過在 kernel 開始執行且 `stvec` 還沒改成 `kernelvec` 的這段期間，`stvec` 仍指向 `uservec`，這段期間如果發生了裝置中斷就會有問題。 所幸 RISC-V 在進入 trap 時會自動關閉中斷，而 `usertrap` 也會等到設完 `stvec` 才重新開啟中斷
 
 ## 4.6 Page-fault exceptions
 
 xv6 對於例外狀況的反應相當無趣：如果例外發生在 user space，kernel 就會把出錯的 process 給 kill 掉； 如果例外發生在 kernel，kernel 則會直接 panic。 真正的作業系統通常會用更有趣的方式來處理這些狀況
 
-舉個例子，許多 kernel 會利用 page fault 來實作 copy-on-write（COW）型的 `fork`。 為了說明這種 `fork`，讓我們回到 xv6 的 `fork`，它在第三章內有被提到。 `fork` 會讓 child process 初始的記憶體內容和 parent process 當下的記憶體內容相同。 xv6 用 `uvmcopy`[（kernel/vm.c:313）](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/vm.c#L313)來實作這個功能，它會為 child 配置實體記憶體，並把 parent 的記憶體內容複製過去。 如果能讓 parent 和 child 共享 parent 的實體記憶體，效率會更高。 不過直接這樣做是行不通的，因為他們會互相寫入共享的 stack 和 heap，導致彼此的執行出錯
+舉個例子，許多 kernel 會利用 page fault 來實作 copy-on-write（COW）型的 `fork`。 為了說明這種 `fork`，讓我們回到 xv6 的 `fork`，它在第三章內有被提到。 `fork` 會讓 child process 初始的記憶體內容和 parent process 當下的記憶體內容相同。 xv6 用 `uvmcopy`（[kernel/vm.c:313](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/vm.c#L313)）來實作這個功能，它會為 child 配置實體記憶體，並把 parent 的記憶體內容複製過去。 如果能讓 parent 和 child 共享 parent 的實體記憶體，效率會更高。 不過直接這樣做是行不通的，因為他們會互相寫入共享的 stack 和 heap，導致彼此的執行出錯
 
 只要搭配正確的 page table 權限設定與 page fault 機制，parent 和 child 是可以安全地共享實體記憶體的。 當某個虛擬位址沒有對應的 page table 映射，或該映射的 `PTE_V` 位元沒被設起來，或權限位元（`PTE_R`、`PTE_W`、`PTE_X`、`PTE_U`）不允許所嘗試的操作時，CPU 就會產生 page-fault exception。 在 RISC-V 架構中，page fault 分為三種類型：load page fault（由 `load` 指令引起）、store page fault（由 `store` 指令引起）和 instruction page fault（由 instruction fetch 造成）。 `scause` 暫存器會指出是哪種 page fault，而 `stval` 則會記錄無法被轉換的位址
 

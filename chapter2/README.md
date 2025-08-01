@@ -129,7 +129,7 @@ xv6 為每個行程維護一份獨立的 page table，來定義該行程的位�
 
 在位址空間的頂端，xv6 配置了一個 page（4096 bytes）的 trampoline 和一個 page 的 trapframe。 xv6 利用這兩個 page 來實作從 user space 轉入 kernel space 再返回的機制，trampoline page 中含有切換模式所需的程式碼，而 trapframe page 則用來儲存行程的使用者暫存器，這在第四章中會進一步解釋
 
-xv6 的 kernel 為每個行程維護許多狀態，這些狀態集中存放在 `struct proc` 結構中（定義於 [kernel/proc.h:85](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/proc.h#L85)）。 對一個行程來說，最重要的 kernel 狀態包含其 page table、kernel stack，以及執行狀態（run state）。 本文中將使用 `p->xxx` 的方式來表示 `proc` 結構中的成員，例如 `p->pagetable` 表示該行程的 page table 指標
+xv6 的 kernel 為每個行程維護許多狀態，這些狀態集中存放在 `struct proc` 結構中（[kernel/proc.h:85](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/proc.h#L85)）。 對一個行程來說，最重要的 kernel 狀態包含其 page table、kernel stack，以及執行狀態（run state）。 本文中將使用 `p->xxx` 的方式來表示 `proc` 結構中的成員，例如 `p->pagetable` 表示該行程的 page table 指標
 
 每個行程都有一個控制執行的執行緒（thread），它保存著執行該行程所需的狀態。 在任一時間點，一個執行緒可能會在某個 CPU 上執行，或者處於暫停狀態（暫時未執行，但未來可以恢復執行）。 為了讓 CPU 能在不同行程之間切換，kernel 會將當前在該 CPU 上執行的執行緒暫停，並儲存它的狀態，然後恢復另一個行程中先前已暫停的執行緒狀態。 執行緒的大部分執行狀態（例如區域變數、函式呼叫的返回位址）會儲存在該執行緒的 stack 中
 
