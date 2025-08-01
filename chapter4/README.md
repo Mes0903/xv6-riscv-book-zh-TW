@@ -205,6 +205,54 @@ xv6 處理來自 kernel code 的 trap 的方式與處理 user code 的 trap 不�
 
 當某個 CPU 從 user space 進入 kernel 時，xv6 會把該 CPU 的 `stvec` 設定為 `kernelvec`； 你可以在 `usertrap` 中看到這段程式碼[（kernel/trap.c:29）](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/trap.c#L29)。 不過在 kernel 開始執行且 `stvec` 還沒改成 `kernelvec` 的這段期間，`stvec` 仍指向 `uservec`，這段期間如果發生了裝置中斷就會有問題。 所幸 RISC-V 在進入 trap 時會自動關閉中斷，而 `usertrap` 也會等到設完 `stvec` 才重新開啟中斷
 
+## 4.6 Page-fault exceptions
+
+xv6 對於例外狀況的反應相當無趣：如果例外發生在 user space，kernel 就會把出錯的 process 給 kill 掉； 如果例外發生在 kernel，kernel 則會直接 panic。 真正的作業系統通常會用更有趣的方式來處理這些狀況
+
+舉個例子，許多 kernel 會利用 page fault 來實作 copy-on-write（COW）型的 `fork`。 為了說明這種 `fork`，讓我們回到 xv6 的 `fork`，它在第三章內有被提到。 `fork` 會讓 child process 初始的記憶體內容和 parent process 當下的記憶體內容相同。 xv6 用 `uvmcopy`[（kernel/vm.c:313）](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/vm.c#L313)來實作這個功能，它會為 child 配置實體記憶體，並把 parent 的記憶體內容複製過去。 如果能讓 parent 和 child 共享 parent 的實體記憶體，效率會更高。 不過直接這樣做是行不通的，因為他們會互相寫入共享的 stack 和 heap，導致彼此的執行出錯
+
+只要搭配正確的 page table 權限設定與 page fault 機制，parent 和 child 是可以安全地共享實體記憶體的。 當某個虛擬位址沒有對應的 page table 映射，或該映射的 `PTE_V` 位元沒被設起來，或權限位元（`PTE_R`、`PTE_W`、`PTE_X`、`PTE_U`）不允許所嘗試的操作時，CPU 就會產生 page-fault exception。 在 RISC-V 架構中，page fault 分為三種類型：load page fault（由 `load` 指令引起）、store page fault（由 `store` 指令引起）和 instruction page fault（由 instruction fetch 造成）。 `scause` 暫存器會指出是哪種 page fault，而 `stval` 則會記錄無法被轉換的位址
+
+COW `fork` 的基本做法是，讓 parent 和 child 一開始共享所有的 page frame，但他們各自都會將這些 page 設成唯讀的（`PTE_W` 欄位清 0）。 parent 和 child 都可以讀取這些共享記憶體，但如果任一方對某個 page 做了寫入操作，RISC-V CPU 就會產生一個 page-fault exception。 kernel 的 trap handler 會處理這個例外：它會配置一張新的 page frame，並把發生 fault 時那個位址對應的 page frame 的內容複製過去。 然後 kernel 會更新發生 fault 的 process 的 page table，把對應的 PTE 改成指向新的 page frame，並允許讀寫
+
+最後 kernel 會讓該 process 從造成 fault 的那條指令重新執行。 而因為這時 PTE 已經允許寫入了，所以這次執行就不會再觸發 page fault。 copy-on-write 需要維護額外的資訊來追蹤哪些 page frame 可以被釋放，因為每張 page 可能會被多張 page table 所參考，這些參考會隨著 fork、page fault、exec 和 exit 而改變。 這樣的記錄機制還帶來一個重要的最佳化：如果某個 process 發生 store page fault，但該 page frame 只有被它自己的 page table 參照，那其實就不需要做複製
+
+copy-on-write 可以讓 `fork` 更快，因為在 fork 的當下不需要複製記憶體。 雖然之後在寫入時還是可能得做複製，但實際上大多數記憶體都不需要真的被複製。 常見的一個例子是 `fork` 後馬上做 `exec`：在 `fork` 之後可能只有少數的 page 被寫入，而 child 的 `exec` 又會釋放掉大部分從 parent 繼承來的記憶體。 copy-on-write `fork` 可以避免複製這些記憶體。 此外，COW `fork` 是透明的，其不需要對應用程式做任何修改，它們就能自動受益
+
+page table 和 page fault 的組合，除了能實作 COW `fork` 以外，還能支援很多有趣的功能。 其中一個被廣泛使用的機制是 lazy allocation，它包含兩個步驟。 第一步，當應用程式呼叫 `sbrk` 向系統要求更多記憶體時，kernel 會紀錄其要增加的大小，但不會馬上分配實體記憶體，也不會為這段新的虛擬位址區間建立 PTE。 第二步，當某個新位址上發生 page fault 時，kernel 才會真正配置一張 page frame，並把它映射進 page table。 就像 COW `fork` 一樣，lazy allocation 對應用程式來說也是透明的
+
+由於應用程式請求的記憶體通常會比實際需要的還多，因此 lazy allocation 在這種情況下就非常有效：對於那些應用程式從未實際使用的 page，kernel 完全不需要做任何處理。 此外，如果應用程式一次請求大量的位址空間，而沒有 lazy allocation 的話，`sbrk` 的成本會非常高：例如應用程式要求 1GB 的記憶體時，kernel 必須配置並清零 262,144 個 4096-byte 的 page。 而 lazy allocation 能使這筆成本隨時間攤平
+
+然而，lazy allocation 也會帶來額外的 page fault 開銷，因為每次 page fault 都會牽涉一次 user/kernel 的切換。 為了降低這項成本，作業系統可以在每次 page fault 時一次配置多個連續的 page，而不是只配置一個，並且還可以為這種 page fault 特化 kernel 的進出路徑
+
+另一個廣泛使用且仰賴 page fault 的功能是 demand paging。 在 xv6 中，當執行 `exec` 時，它會在啟動應用程式前就把應用程式的 text 和 data 段全部載入記憶體。 由於應用程式可能很大，而從硬碟讀資料又很耗時，這個啟動成本對使用者而言可能會很明顯
+
+為了縮短啟動時間，現代的 kernel 一開始並不會把可執行檔載入記憶體，而是建立一份 user page table，並將其中所有 PTE 標成 invalid。 kernel 啟動程式後，每當程式第一次使用某個 page，就會發生 page fault，然後 kernel 根據這個 fault 去從硬碟讀入該 page 的內容，並將它映射到 user 的位址空間。 就像 COW fork 和 lazy allocation 一樣，這個機制對應用程式來說是透明的
+
+電腦上執行的程式還可能會需要超過實體記憶體容量的記憶體。 為了優雅地處理這種情況，作業系統可能會實作 swapping 的機制。 它的基本想法是：只在記憶體中保留部分使用者的 page，剩下的則儲存在硬碟中的 swap space。 kernel 會把那些對應到硬碟中的 swap space 的記憶體，其對應的 PTE 標為 invalid
+
+接著如果應用程式試圖使用某個已經被 swap out 到硬碟的 page，便會觸發 page fault，此時該 page 必須被 swap in：kernel 的 trap handler 會配置一張實體記憶體，將對應的資料從硬碟讀回 RAM，然後更新對應的 PTE，讓它指向這張新的 page frame
+
+如果某個 page 需要被 swap in，但當下已經沒有任何可用的實體記憶體了，這種情況下 kernel 必須先釋放出一張 page frame，方法是將其中的一個 page 做 swap out，也就是把它「搬移」到硬碟上的 swap space，並將所有參考該 page 的 PTE 標記為 invalid
+
+不過「搬移」的成本很高，因此在它不常發生的情況下 paging 的表現較好，這代表應用程式只會使用其分配記憶體中的一小部分，而且這些常用 page 的總能被放在記憶體裡。 這種特性通常被稱為良好的 locality of reference。 就像其他許多虛擬記憶體技術一樣，kernel 通常會讓 swapping 對應用程式來說是透明的
+
+::: tip  
+這邊將原文的用詞改成了更常見的用詞：
+
+- swapping：原文為 paging to disk
+- swap out：原文為 paged out
+- swap in：原文為 paged in
+
+主要是因為對於「page」相關的詞我已經選擇保留原文了，這幾個再加進來會有些雜亂，導致不好閱讀  
+:::
+
+即使硬體提供了大量的記憶體，電腦在實際運作時仍經常處於幾乎沒有「空閒（free）」實體記憶體的狀態。 例如，雲端服務提供者通常會在單一機器上同時運行許多客戶的應用程式，以達到硬體資源的最大利用率。 再例如，使用者會在只有少量實體記憶體的智慧型手機上同時執行多個應用程式。 在這些情況下，每次配置一張新 page 前都可能需要先將某張現有的 page swap out。 因此，當實體記憶體資源緊張時，配置記憶體的成本會較高
+
+在可用記憶體緊張、而程式實際上只使用其配置記憶體的一部分時，lazy allocation 和 demand paging 特別具有優勢。 這些技術還能避免某些情況下的資源浪費，例如：某個 page 被配置或從硬碟載入，但卻從未被實際使用，或甚至在使用前就被 swap out 了
+
+還有一些其他功能同樣結合了 paging 和 page fault exception，例如自動延展的 stack 以及 memory-mapped file。 memory-mapped file 是指程式透過 `mmap` 系統呼叫把檔案映射進自己的位址空間，這樣程式就可以直接用 `load` 和 `store` 指令來讀寫這些檔案了
+
 ## Bibliography
 
 - <a id="1">[1]</a>：The RISC-V instruction set manual Volume II: privileged specification. https://drive.google.com/file/d/1uviu1nH-tScFfgrovvFCrj7Omv8tFtkp/view?usp=drive_link, 2024
