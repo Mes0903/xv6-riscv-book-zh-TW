@@ -253,6 +253,27 @@ page table 和 page fault 的組合，除了能實作 COW `fork` 以外，還能
 
 還有一些其他功能同樣結合了 paging 和 page fault exception，例如自動延展的 stack 以及 memory-mapped file。 memory-mapped file 是指程式透過 `mmap` 系統呼叫把檔案映射進自己的位址空間，這樣程式就可以直接用 `load` 和 `store` 指令來讀寫這些檔案了
 
+## 4.7 Real world
+
+trampoline 與 trapframe 的設計看起來可能過於複雜。 背後的主要原因是 RISC-V 在觸發 trap 時會刻意地不做太多事，這樣可以讓 trap handler 的執行速度更快，而這點在實作上是非常重要的。 結果就是 kernel 的 trap handler 的前幾條指令必須在 user environment 下執行：使用的是 user page table，還有 user 的暫存器內容。 而且 trap handler 起初也不知道像「目前執行的 process 是誰」或「kernel page table 的位址」這些有用的資訊
+
+這些問題之所以有解，是因為 RISC-V 提供了一些受保護的區域讓 kernel 可以在進入 user space 前先儲存資訊，例如 `sscratch` 暫存器，還有一些指向 kernel memory 的 user page table entry，但這些 entry 並沒有設 `PTE_U` 權限來保護。 xv6 的 trampoline 與 trapframe 就是善用了這些 RISC-V 的特性
+
+如果 kernel memory 會被映射到每個 process 的 user page table 中（但不設 `PTE_U` 權限），那就不需要額外的 trampoline page 了。 這樣一來，從 user space trap 進 kernel 時也就不需要切換 page table。 這又讓 kernel 在實作 system call 時可以直接存取 user memory，因為這些記憶體已經被映射到了目前的 page table 中。 許多作業系統都會這樣設計來提升效率。 不過 xv6 為了避免 kernel 不小心使用 user pointer 而產生安全漏洞，也為了簡化 user 與 kernel 的位址空間不重疊所需要的處理，因此選擇不使用這種設計
+
+真正的作業系統會實作像是 copy-on-write `fork`、lazy allocation、demand paging、paging to disk、memory-mapped file 等等機制。 此外，這些系統也會盡量讓整個實體記憶體都有用處，通常會拿來快取那些不屬於任何 process 的檔案內容
+
+真正的作業系統也會提供一些 system call 讓應用程式來管理自己的位址空間，或是讓它自己處理 page fault，例如 `mmap`、`munmap`、`sigaction` 這些呼叫，也會提供像 `mlock` 這樣的呼叫來讓應用程式使用的 page 固定在記憶體裡而不被 swap out，或是像 `madvise` 這樣的呼叫讓應用程式告訴 kernel 它打算怎麼使用這塊記憶體
+
+## 4.8 Exercises
+
+1. `copyin` 和 `copyinstr` 會透過軟體的方式走訪 user page table。 設定 kernel 的 page table，讓 kernel 能直接映射 user program，這樣 `copyin` 和 `copyinstr` 就可以改用 `memcpy` 把 system call 的引數複製到 kernel space，而不用自己做 page table walk 了
+2. 實作 lazy memory allocation
+3. 實作 COW fork
+4. 有沒有方法可以去掉每個 user address space 中的 `TRAPFRAME` page 映射？ 例如，`uservec` 是否可以改成直接把 32 個 user 暫存器 push 到 kernel stack，或是存在 `proc` 結構中？
+5. 能不能改寫 xv6，讓它不需要 `TRAMPOLINE` page 的映射？
+6. 實作 `mmap`
+
 ## Bibliography
 
 - <a id="1">[1]</a>：The RISC-V instruction set manual Volume II: privileged specification. https://drive.google.com/file/d/1uviu1nH-tScFfgrovvFCrj7Omv8tFtkp/view?usp=drive_link, 2024
