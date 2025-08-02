@@ -176,3 +176,43 @@ xv6 在許多地方使用了 lock 來避免 race condition。 就如前面提到
 要遵守全域的、避免死結的 lock 取得順序，其實比想像中困難。 某些時候，這樣的 lock 順序會與程式邏輯的結構衝突。 例如，某個模組 M1 呼叫另一個模組 M2，但 lock 的順序卻要求先取得 M2 的 lock，才能取得 M1 的 lock。 也有時候，在事前根本不知道下一把要取得的 lock 是哪一個，因為可能必須先持有某把 lock 才能知道下一個要鎖的是誰
 
 這種情況會出現在檔案系統中，像是在依序解析路徑名稱的每一層時會發生，也會出現在 `wait` 與 `exit` 搜尋 process table 中的子行程時。 最後，避免死結的需求也常常限制了 lock 粒度的細緻程度，因為使用越多的 lock，死結發生的機會也越高。 事實上，如何避免死結，常常是 kernel 實作時的一個主要考量因素
+
+## 6.5 Re-entrant locks
+
+乍看之下，某些死結與 lock 順序的難題似乎可以透過使用 re-entrant locks（又稱為 recursive locks）來避免。 這種 lock 的設計概念是：如果某個 process 已經持有了一把 lock，並且它再次嘗試去取得同一把 lock，那麼 kernel 可以直接允許這件事發生（因為這個 process 已經擁有該 lock），而不是像 xv6 那樣直接觸發 panic
+
+然而事實上，re-entrant lock 反而讓並行性的分析變得更困難：它破壞了一個重要的直覺，也就是「持有 lock 的區段之間具有原子性（critical section 彼此互斥）」。 來看看以下這些函式：`f`、`g`，以及一個假設性的函式 `h`：
+
+```c
+struct spinlock lock;
+int data = 0; // protected by lock
+
+f() {
+  acquire(&lock);
+  if(data == 0){
+    call_once();
+    h();
+    data = 1;
+  }
+  release(&lock);
+}
+
+g() {
+  acquire(&lock);
+  if(data == 0){
+    call_once();
+    data = 1;
+  }
+  release(&lock);
+}
+
+h() {
+  ...
+}
+```
+
+觀察這段程式碼，我們會直覺地認為 `call_once` 只會被呼叫一次：要嘛是在 `f` 中被呼叫，要嘛是在 `g` 中，但不會兩者都呼叫。 但如果允許使用 re-entrant lock，而且 `h` 恰好又呼叫了 `g`，則 `call_once` 將會被呼叫兩次
+
+如果不允許使用 re-entrant lock，那麼當 `h` 呼叫 `g` 會造成死結，這雖然也不好，但如果重複呼叫 `call_once` 是一個嚴重錯誤的話，那麼死結反而是比較可以接受的情況。 因為 kernel 開發者會觀察到這個死結（kernel 會 panic），然後可以修正這段程式碼來避免它； 而若是 `call_once` 被呼叫了兩次，可能會默默地造成一個很難追蹤的錯誤
+
+基於這個原因，xv6 採用的是較容易理解的 non-re-entrant（不可重入）lock。 當然，只要程式設計者謹記加鎖的規則，這兩種方式都可以良好運作。 如果 xv6 要改成支援 re-entrant lock，就必須修改 `acquire`，讓它能夠辨識目前的 lock 是否已經被呼叫該函式的 thread 持有。 此外還需要在 `struct spinlock` 中加入一個用來記錄巢狀鎖定次數的欄位，其設計方式會類似接下來會介紹的 `push_off`
