@@ -121,3 +121,42 @@ xv6 的 `acquire`（[kernel/spinlock.c:22](https://github.com/mit-pdos/xv6-riscv
 為了除錯用途，當成功取得 lock 後，`acquire` 會紀錄是哪個 CPU 取得了這把 lock（`lk->cpu`）。 `lk->cpu` 這個欄位也會被該 lock（`lk`）保護，因此只能在持有該 lock 的情況下修改它
 
 `release`（[kernel/spinlock.c:47](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/spinlock.c#L47)）函式與 `acquire` 相反：它會先清空 `lk->cpu` 欄位，然後釋放 lock。 從概念上來看，釋放 lock 只需要將 `lk->locked` 設為 0 就可以了。 但是 C 語言標準允許編譯器用多個 store 指令來實作單個 assignment，所以賦值操作在多執行緒的環境下可能不會是 atomic 的。 為了避免這個問題，`release` 使用了 C 標準庫中的 `__sync_lock_release` 函式，這個函式會做原子性的賦值以將 `lk->locked` 設為 0，它的底層也會轉換成 RISC-V 的 `amoswap` 指令
+
+## 6.3 Code: Using locks
+
+xv6 在許多地方使用了 lock 來避免 race condition。 就如前面提到的，`kalloc`（[kernel/kalloc.c:69](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/kalloc.c#L69)）和 `kfree`（[kernel/kalloc.c:47](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/kalloc.c#L47)）是很好的例子。你可以嘗試做第 1 和第 2 題練習，看看當這些函式省略 lock 時會發生什麼事。 你可能會發現實際上我們很難觸發明顯的錯誤行為，這也顯示要可靠地測試某段程式碼是否真的沒有 lock 的問題或 race condition 是很困難的。 xv6 本身也可能仍有尚未被發現的 race 問題
+
+使用 lock 最困難的地方之一是決定要使用多少把 lock，以及每把 lock 應該保護哪些資料與不變式，這有一些基本原則可以遵循。 第一，當某個變數可能在一個 CPU 上被寫入，同時又可能在另一個 CPU 上被讀取或寫入，就應該使用 lock 來防止這兩個操作重疊。 第二，記住 lock 的目的是保護不變式：如果某個不變式涵蓋了多個記憶體位置，那麼通常這些位置都應該由同一把 lock 保護，才能確保這個不變式不會被破壞
+
+上述規則說明了何時需要加鎖，但並未說明什麼情況下不需要加鎖。 如前面所述，為了效能考量，我們不應該過度地加鎖，因為鎖會減少平行性。 如果不需要平行性，那可以只用單一執行緒，這樣就不用擔心加鎖的問題。 一個簡單的 kernel 在多核系統上也可以這麼做：只要在進入 kernel 時取得一把全域的 lock，離開時再釋放（但像是 `pipe` 的讀取或 `wait` 之類會阻塞的系統呼叫會變得比較麻煩）
+
+很多單核作業系統就是用這種方式轉移到多核環境的，這種做法有時被稱為「big kernel lock」。 但這會犧牲平行性：任何時候只有一個 CPU 能執行 kernel。 如果 kernel 需要進行大量地運算，改用更多、且範圍較小的 lock 會更有效率，這樣 kernel 才能同時在多個 CPU 上執行
+
+以 coarse-grained（粗粒度）lock 為例，xv6 實作在 `kalloc.c` 中的記憶體分配器內，整個 free list 是由一把 lock 所保護的。 如果有多個 process 在不同的 CPU 上同時試圖分配記憶體 page，它們就得輪流等待，在 `acquire` 中自旋。 自旋會浪費 CPU 時間，因為這不算是實質工作。 如果這把 lock 的競爭浪費了大量的 CPU 時間，也許可以透過修改分配器的設計，改為使用多個 free list，每個都有自己的 lock，如此就能真正做到平行地進行記憶體分配
+
+再看一個 fine-grained（細粒度）lock 的例子：xv6 為每個檔案設置了一把獨立的 lock，因此當不同的 process 操作不同的檔案時，通常不需等待彼此的 lock，可以同時進行。 這個檔案鎖的設計其實還可以做得更細，例如若要允許多個 process 同時寫入同一個檔案的不同區塊，就可以再細分鎖的範圍。 最終，鎖的粒度應根據實際效能測試以及系統設計的複雜度來決定
+
+後續章節在介紹 xv6 的各部分時，會提到 xv6 是如何使用 lock 來處理並行問題的。 作為預告，表 6.3 列出了 xv6 中所有使用的 lock
+
+<span class = "center-column">
+
+| **Lock**            | **Description**                                                  |
+|---------------------|------------------------------------------------------------------|
+| `bcache.lock`       | Protects allocation of block buffer cache entries               |
+| `cons.lock`         | Serializes access to console hardware, avoids intermixed output |
+| `ftable.lock`       | Serializes allocation of a struct file in file table            |
+| `itable.lock`       | Protects allocation of in-memory inode entries                  |
+| `vdisk_lock`        | Serializes access to disk hardware and queue of DMA descriptors |
+| `kmem.lock`         | Serializes allocation of memory                                 |
+| `log.lock`          | Serializes operations on the transaction log                    |
+| `pipe`'s `pi->lock` | Serializes operations on each pipe                              |
+| `pid_lock`          | Serializes increments of `next_pid`                             |
+| `proc`'s `p->lock`  | Serializes changes to process's state                           |
+| `wait_lock`         | Helps wait avoid lost wakeups                                   |
+| `tickslock`         | Serializes operations on the ticks counter                      |
+| `inode`'s `ip->lock`| Serializes operations on each inode and its content             |
+| `buf`'s `b->lock`   | Serializes operations on each block buffer                      |
+
+（Figure 6.3: Locks in xv6）
+
+</span>
