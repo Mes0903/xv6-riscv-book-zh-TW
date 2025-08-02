@@ -216,3 +216,19 @@ h() {
 如果不允許使用 re-entrant lock，那麼當 `h` 呼叫 `g` 會造成死結，這雖然也不好，但如果重複呼叫 `call_once` 是一個嚴重錯誤的話，那麼死結反而是比較可以接受的情況。 因為 kernel 開發者會觀察到這個死結（kernel 會 panic），然後可以修正這段程式碼來避免它； 而若是 `call_once` 被呼叫了兩次，可能會默默地造成一個很難追蹤的錯誤
 
 基於這個原因，xv6 採用的是較容易理解的 non-re-entrant（不可重入）lock。 當然，只要程式設計者謹記加鎖的規則，這兩種方式都可以良好運作。 如果 xv6 要改成支援 re-entrant lock，就必須修改 `acquire`，讓它能夠辨識目前的 lock 是否已經被呼叫該函式的 thread 持有。 此外還需要在 `struct spinlock` 中加入一個用來記錄巢狀鎖定次數的欄位，其設計方式會類似接下來會介紹的 `push_off`
+
+## 6.6 Locks and interrupt handlers
+
+有些 xv6 的 spinlock 用來保護同時被 thread 與 interrupt handler 存取的資料。 舉例來說，`clockintr` 這個 timer interrupt handler 可能會於 kernel thread 正在 `sys_sleep`（[kernel/sysproc.c:61](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/sysproc.c#L61)）中讀取 `ticks`（[kernel/trap.c:164](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/trap.c#L164)）時，嘗試把 `ticks` 加一。 為了序列化這兩種存取，xv6 使用 `tickslock` 這把 lock 來保護 `ticks`
+
+spinlock 與中斷的交互作用會帶來潛在的危險。 假設現在 `sys_sleep` 已經持有了 `tickslock`，而此時該 CPU 被 timer interrupt 打斷，進入 `clockintr`。 `clockintr` 接著會嘗試取得 `tickslock`，發現它已被持有，於是就會等待釋放。 但問題在於：這把 lock 只能由 `sys_sleep` 釋放，而 `sys_sleep` 又無法繼續執行，因為中斷尚未結束。 因此整個 CPU 會陷入死結，所有需要這把 lock 的程式碼也會跟著卡住
+
+::: tip  
+這段描述的是一種「自我死結」情境，也稱為 interrupt-induced deadlock：thread 拿著 lock 時被中斷，而 interrupt handler 又需要那把 lock，但 thread 又得等中斷結束才會繼續執行。 兩者互相依賴，導致整個 CPU 無限等待。 這個問題特別會發生在 spinlock 無法 sleep 的情況下  
+:::
+
+為了避免上述情況，如果某把 spinlock 是會被中斷處理函式使用的，那麼任何 CPU 在持有這把 lock 的期間，都絕對不能允許中斷。 xv6 採取更保守的做法：當 CPU 取得任何 lock 時，xv6 都會先關閉該 CPU 的中斷。 其他 CPU 上的中斷仍然可以發生，所以在其他 CPU 上，interrupt handler 仍可能會去 `acquire` 某把 spinlock，只是不能在持有該 lock 的同一 CPU 上這樣做
+
+xv6 會在 CPU 不再持有任何 spinlock 時重新開啟中斷。 為了支援巢狀的 critical section，它必須做一些狀態紀錄。 `acquire` 會呼叫 `push_off`（[kernel/spinlock.c:89](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/spinlock.c#L89)），`release` 則會呼叫 `pop_off`（[kernel/spinlock.c:100](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/spinlock.c#L100)），這兩個函式用來追蹤目前 CPU 上的 lock 巢狀層數。 當這個巢狀層數變成 0 時，`pop_off` 會還原當初進入最外層 critical section 時的中斷狀態。 `intr_off` 與 `intr_on` 則分別對應執行 RISC-V 關閉與開啟中斷的指令
+
+非常重要的一點是，`acquire` 必須在設置 `lk->locked`（[kernel/spinlock.c:28](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/spinlock.c#L28)）之前就先呼叫 `push_off`。 如果順序顛倒，就會出現一個短暫的時間區間，在那期間 lock 已經被持有，但中斷仍然是開啟的，此時若剛好發生中斷，就會導致整個系統死結。 同樣地，也必須在釋放 lock 之後才呼叫 `pop_off`（[kernel/spinlock.c:66](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/spinlock.c#L66)）
