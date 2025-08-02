@@ -147,7 +147,7 @@ xv6 的 kernel 為每個行程維護許多狀態，這些狀態集中存放在 `
 
 boot loader 會將 xv6 kernel 載入至記憶體中的實體位址 `0x80000000`。 之所以不是放在 `0x0`，是因為從 `0x0` 到 `0x80000000` 的位址範圍被保留給了 I/O 裝置使用
 
-`_entry` 內的指令會建立一個 stack，讓 xv6 能夠執行 C 程式碼。 xv6 在 `start.c`（[kernel/start.c:11](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/start.c#L11)）中宣告了一個初始 stack 區域 `stack0`。 `_entry` 的程式碼會將 stack 指標（`sp`）設為 `stack0 + 4096`，即 stack 頂端，因為在 RISC-V 中 stack 是向下成長的。 現在 kernel 已經有 stack 了，`_entry` 會接著呼叫位於 `start`（[kernel/start.c:15](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/start.c#L15)）的 C 函式
+`_entry` 內的指令會建立一個 stack，讓 xv6 能夠執行 C 程式碼。 xv6 在 start.c（[kernel/start.c:11](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/start.c#L11)）中宣告了一個初始 stack 區域 `stack0`。 `_entry` 的程式碼會將 stack 指標（`sp`）設為 `stack0 + 4096`，即 stack 頂端，因為在 RISC-V 中 stack 是向下成長的。 現在 kernel 已經有 stack 了，`_entry` 會接著呼叫位於 `start`（[kernel/start.c:15](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/start.c#L15)）的 C 函式
 
 `start` 函式會進行一些只能在 machine mode 下執行的設定，然後切換到 supervisor mode。 為了進入 supervisor mode，RISC-V 提供了 `mret` 指令，這個指令通常用來從一個 supervisor mode 對 machine mode 的呼叫中返回。 然而 `start` 並非是從這類呼叫返回的，不過它會模擬那種情境：它會在 `mstatus` 暫存器中設定前一個權限模式為 supervisor，將 `main` 的位址寫入 `mepc` 暫存器中作為返回位址，將 `satp` 設為 0 以停用 supervisor mode 下的虛擬位址轉譯，並將所有中斷與例外的處理委託給 supervisor mode
 

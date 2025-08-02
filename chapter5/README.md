@@ -29,7 +29,7 @@ UART 有一些控制暫存器，每個暫存器的寬度都是一個 byte，它�
 
 xv6 的 `main` 會呼叫 `consoleinit`（[kernel/console.c:182](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/console.c#L182)）來初始化 UART 硬體。 這段程式會設定 UART，讓它在接收到每個輸入 byte 時產生接收中斷（receive interrupt），以及在每個輸出 byte 傳送完成時產生傳送完成中斷（transmit complete interrupt）（[kernel/uart.c:53](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/uart.c#L53)）
 
-xv6 的 shell 會透過一個由 `init.c` 所開啟的 file descriptor（[user/init.c:19](https://github.com/mit-pdos/xv6-riscv/blob/riscv//user/init.c#L19)）來從 console 讀取資料。 對 `read` system call 的呼叫會一路進入 kernel，最後到達 `consoleread`（[kernel/console.c:80](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/console.c#L80)）。 `consoleread` 會等待輸入透過中斷抵達，並將輸入暫存到 `cons.buf` 中，然後將輸入複製到 user space，並在整行輸入完成後才回傳給 user process。 若使用者尚未輸入完整的一行，任何呼叫 `read` 的 process 都會停在 `sleep`（[kernel/console.c:96](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/console.c#L96)）呼叫中，第七章節會再詳細說明 `sleep` 的運作
+xv6 的 shell 會透過一個由 init.c 所開啟的 file descriptor（[user/init.c:19](https://github.com/mit-pdos/xv6-riscv/blob/riscv//user/init.c#L19)）來從 console 讀取資料。 對 `read` system call 的呼叫會一路進入 kernel，最後到達 `consoleread`（[kernel/console.c:80](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/console.c#L80)）。 `consoleread` 會等待輸入透過中斷抵達，並將輸入暫存到 `cons.buf` 中，然後將輸入複製到 user space，並在整行輸入完成後才回傳給 user process。 若使用者尚未輸入完整的一行，任何呼叫 `read` 的 process 都會停在 `sleep`（[kernel/console.c:96](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/console.c#L96)）呼叫中，第七章節會再詳細說明 `sleep` 的運作
 
 ::: tip  
 `read` 系統呼叫的實作為 `sys_read`，內部最後會呼叫 `fileread`，而 `fileread` 會根據 `file` 這個結構體內的成員 `major` 來判斷要怎麼讀取這個 file descriptor：
@@ -67,7 +67,7 @@ consoleinit(void)
 }
 ```
 
-而前面有說 `init.c` 會開一個 file descriptor 來從 console 讀取資料，其底層就是對應到 `CONSOLE`。 因此可知讀取 console 的流程為：`read` → `fileread` → `consoleread`  
+而前面有說 init.c 會開一個 file descriptor 來從 console 讀取資料，其底層就是對應到 `CONSOLE`。 因此可知讀取 console 的流程為：`read` → `fileread` → `consoleread`  
 :::
 
 當使用者輸入一個字元時，UART 硬體會要求 RISC-V CPU 產生一個中斷，這會啟動 xv6 的 trap handler。 trap handler 接著會呼叫 `devintr`（[kernel/trap.c:185](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/trap.c#L185)），它會查看 RISC-V 的 `scause` 暫存器，以判斷該中斷是否來自外部裝置。 接著，它會向名為 PLIC 的硬體單元查詢是由哪個裝置產生的中斷（[kernel/trap.c:193](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/trap.c#L193)）； 對於 UART 產生的中斷，`devintr` 會呼叫 `uartintr`
@@ -154,7 +154,7 @@ UART driver 會先將收到的資料複製到 kernel 的緩衝區，再複製到
 
 ## 5.6 Exercises
 
-1. 修改 `uart.c`，讓它完全不使用中斷。 你可能也需要修改 `console.c`
+1. 修改 uart.c，讓它完全不使用中斷。 你可能也需要修改 console.c
 2. 為網卡新增一個 driver
 
 ## Bibliography
