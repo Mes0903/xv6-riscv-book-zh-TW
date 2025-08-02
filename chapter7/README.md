@@ -283,3 +283,15 @@ Process A
 :::
 
 `scheduler`（[kernel/proc.c:445](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/proc.c#L445)）會跑一個無限迴圈：找出一個可執行的 process，執行它直到它釋放 CPU，再重複這個流程。 scheduler 會遍歷整個 process table，尋找狀態為 `RUNNABLE` 的 process。 一旦找到，它會設置這顆 CPU 的 `c->proc` 指標，將該 process 的狀態設為 `RUNNING`，然後呼叫 `swtch` 開始執行它（[kernel/proc.c:461-466](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/proc.c#L461-L466)）
+
+## 7.4 Code: mycpu and myproc
+
+xv6 經常需要取得目前正在執行的 process 所對應的 `proc` 結構的指標。 在單核系統中，可以使用一個全域變數來指向當前的 `proc`。 但這在多核機器上就行不通了，因為每個 CPU 都可能在執行不同的 process。 我們可以透過「每顆 CPU 都擁有自己獨立的一組暫存器」這件事來解決這個問題
+
+當某顆 CPU 正在執行 kernel code 時，xv6 保證這顆 CPU 的 `tp` 暫存器會儲存它的 hartid。 RISC-V 為每顆 CPU 指派了一個唯一的 hartid。 `mycpu` 函式（[kernel/proc.c:74](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/proc.c#L74)）會使用 `tp` 來索引 `struct cpu` 的陣列，並回傳指向目前這顆 CPU 的 `struct cpu` 的指標。 `struct cpu`（[kernel/proc.h:22](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/proc.h#L22)）中包含了一個指向當前正在這顆 CPU 上執行的 `struct proc` 的指標（若有的話）、這顆 CPU 所對應的 scheduler thread 的暫存器快照、以及用來管理中斷關閉的 spinlock 巢狀層數
+
+要讓每顆 CPU 的 `tp` 保持對應的 hartid，其實需要一點額外處理，因為使用者程式是可以隨意修改 `tp` 的。 `start` 函式會在 CPU 的開機過程早期、仍處於 machine mode 時設置 `tp`（[kernel/start.c:45](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/start.c#L45)）。 `usertrapret` 會把 `tp` 儲存在 trampoline page 中，以防使用者程式改動了它。 最後，`uservec` 在從 user space 進入 kernel 時會還原之前儲存的 `tp`（[kernel/trampoline.S:78](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/trampoline.S#L78)）。 編譯器保證在 kernel code 中永遠不會去修改 `tp`。 如果 xv6 可以直接向 RISC-V 硬體查詢目前的 hartid 會更方便，但 RISC-V 規範中只有 machine mode 才能這麼做，supervisor mode 不行
+
+`cpuid` 和 `mycpu` 的回傳值比較脆弱（fragile），如果在這之後發生 timer 中斷，導致目前這條 thread 放棄 CPU，然後稍後被排到另一顆 CPU 上執行，那麼原先回傳的值就會失效。 為了避免這個問題，xv6 要求呼叫這些函式的程式碼在使用期間必須先關閉中斷，等到使用完畢後再重新開啟
+
+函式 `myproc`（[kernel/proc.c:83](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/proc.c#L83)）會回傳目前正在當前 CPU 上執行的 process 的 `struct proc` 指標。 `myproc` 在執行過程中會先關閉中斷，接著呼叫 `mycpu`，從 `struct cpu` 中取得目前的 `c->proc`，最後再重新開啟中斷。 `myproc` 的回傳值在中斷開啟的情況下也可以安全使用：即使 timer 中斷將目前的 process 移動到另一顆 CPU，指向這個 process 的 `struct proc` 指標仍然是同一個
