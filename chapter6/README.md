@@ -132,7 +132,7 @@ xv6 在許多地方使用了 lock 來避免 race condition。 就如前面提到
 
 很多單核作業系統就是用這種方式轉移到多核環境的，這種做法有時被稱為「big kernel lock」。 但這會犧牲平行性：任何時候只有一個 CPU 能執行 kernel。 如果 kernel 需要進行大量地運算，改用更多、且範圍較小的 lock 會更有效率，這樣 kernel 才能同時在多個 CPU 上執行
 
-以 coarse-grained（粗粒度）lock 為例，xv6 實作在 `kalloc.c` 中的記憶體分配器內，整個 free list 是由一把 lock 所保護的。 如果有多個 process 在不同的 CPU 上同時試圖分配記憶體 page，它們就得輪流等待，在 `acquire` 中自旋。 自旋會浪費 CPU 時間，因為這不算是實質工作。 如果這把 lock 的競爭浪費了大量的 CPU 時間，也許可以透過修改分配器的設計，改為使用多個 free list，每個都有自己的 lock，如此就能真正做到平行地進行記憶體分配
+以 coarse-grained（粗粒度）lock 為例，xv6 實作在 kalloc.c 中的記憶體分配器內，整個 free list 是由一把 lock 所保護的。 如果有多個 process 在不同的 CPU 上同時試圖分配記憶體 page，它們就得輪流等待，在 `acquire` 中自旋。 自旋會浪費 CPU 時間，因為這不算是實質工作。 如果這把 lock 的競爭浪費了大量的 CPU 時間，也許可以透過修改分配器的設計，改為使用多個 free list，每個都有自己的 lock，如此就能真正做到平行地進行記憶體分配
 
 再看一個 fine-grained（細粒度）lock 的例子：xv6 為每個檔案設置了一把獨立的 lock，因此當不同的 process 操作不同的檔案時，通常不需等待彼此的 lock，可以同時進行。 這個檔案鎖的設計其實還可以做得更細，例如若要允許多個 process 同時寫入同一個檔案的不同區塊，就可以再細分鎖的範圍。 最終，鎖的粒度應根據實際效能測試以及系統設計的複雜度來決定
 
@@ -276,3 +276,25 @@ xv6 提供了 sleep-lock 來滿足這個需求。 `acquiresleep`（[kernel/sleep
 由於 sleep-lock 不會關閉中斷，因此不能在 interrupt handler 中使用。 又因為 `acquiresleep` 可能會讓出 CPU，所以 sleep-lock 也不能被用在 spinlock 的 critical section 內（不過反過來，spinlock 可以在 sleep-lock 的 critical section 裡使用）
 
 總的來說，spinlock 適合用在短暫的 critical section，因為等待它會浪費 CPU； 而 sleep-lock 則適合用在耗時較長的操作上
+
+## 6.9 Real world
+
+即使經過了多年針對並行原語與平行運算的研究，使用 lock 進行程式設計仍然是一項困難的挑戰。 將 lock 隱藏在像是 synchronized queue 這種高階結構中通常是比較好的做法，不過 xv6 並沒有這樣做。 如果你必須直接使用 lock 來寫程式，建議搭配能偵測 race condition 的工具，因為人們很容易漏掉某些需要 lock 保護的不變性條件
+
+大多數作業系統都支援 POSIX threads（Pthreads），這允許一個使用者行程能同時在多個 CPU 上執行數個執行緒。 Pthreads 提供了使用者層級的 lock、barrier 等功能。 Pthreads 也允許程式設計者指定某些 lock 是否要支援 re-entrant
+
+在使用者層級實作 Pthreads 需要作業系統的支援。 例如，如果一個 pthread 在某個 system call 中被 block，則同一個 process 中的其他 pthread 應該仍能在那顆 CPU 上繼續執行。 又例如，如果某個 pthread 改變了整個 process 的位址空間（像是對記憶體進行 map 或 unmap），kernel 必須讓所有在其他 CPU 上執行該 process 的執行緒也能更新它們的 page table hardware，以反映這個位址空間的改變
+
+雖然可以在不使用 atomic instruction 的情況下實作 lock<sup>[[3]](#3)</sup>，但這樣的做法成本很高，因此大多數作業系統會選擇使用 atomic instruction 來實作 lock
+
+當多個 CPU 同時嘗試 acquire 同一把 lock 時，這個 lock 的開銷就會變得很高。 如果某個 CPU 把 lock 保存在它的本地快取中，而另一個 CPU 想要取得這把 lock，那麼用來更新這段快取的 atomic instruction 必須先將這條 cache line 從原本的 CPU 移動到目標 CPU，並可能需要讓其他 CPU 中的快取副本失效。 從其他 CPU 的快取中取出 cache line 的成本，可能會比從本地快取中取得的成本還高出數十倍
+
+為了避免 lock 帶來的高開銷，許多作業系統會使用 lock-free 的資料結構與演算法<sup>[[4]](#4), [[5]](#5)</sup>。 例如，可以設計一個 linked list，在查詢的時候完全不需要用 lock，而插入時也只需一個 atomic 指令。 不過 lock-free 程式設計比使用 lock 更加複雜，例如必須考慮指令與記憶體的重排序。 考慮到用 lock 寫程式已經夠困難了，因此 xv6 選擇不加入 lock-free 機制，以減少複雜性
+
+## 6.10 Exercises
+
+1. 註解掉 `kalloc` 中對 `acquire` 與 `release` 的呼叫（[kernel/kalloc.c:69](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/kalloc.c#L69)）。 這應該會對呼叫 `kalloc` 的 kernel 程式碼造成問題。 你預期會看到什麼症狀？ 當你執行 xv6 時是否真的看到了這些症狀？ 執行 `usertests` 時又會如何？ 如果你沒有看到任何問題，那是為什麼？ 試著在 `kalloc` 的 critical section 中加入一些 dummy 的迴圈，看看能不能讓問題更明顯
+2. 假設你恢復 `kalloc` 的 locking，改為註解掉 `kfree` 的 locking，那會發生什麼問題？ 相比之下，`kfree` 缺少 lock 是不是沒 `kalloc` 那麼嚴重？
+3. 如果兩個 CPU 同時呼叫 `kalloc`，其中一個必須等待另一個，這對效能是有害的。 請修改 kalloc.c 增加並行性，使得不同 CPU 上的 `kalloc` 呼叫可以同時進行，而不必互相等待
+4. 使用 POSIX threads 撰寫一個平行程式（大多數作業系統都有支援）。 例如你可以實作一個平行的 hash table，並測量當 CPU 數增加時，put/get 的數量是否能跟著擴張
+5. 在 xv6 上實作一個簡化版的 Pthreads。 也就是實作一個使用者層級的 thread library，使得一個使用者行程可以有不只一個 thread，並安排這些 thread 可以在不同 CPU 上平行執行。 請設計一套正確處理 blocking system call 與共享位址空間改動的方案
