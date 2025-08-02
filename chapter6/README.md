@@ -160,3 +160,19 @@ xv6 在許多地方使用了 lock 來避免 race condition。 就如前面提到
 （Figure 6.3: Locks in xv6）
 
 </span>
+
+## 6.4 Deadlock and lock ordering
+
+如果 kernel 中某段程式路徑必須同時持有多把 lock，那麼所有程式路徑都必須以相同的順序取得這些 lock，這一點非常重要，否則會有發生死結（deadlock）的風險。 假設 xv6 中有兩段程式路徑都需要取得 lock A 和 lock B，其中第一段會依序取得 A 再取得 B，而第二段則是先取得 B 再取得 A
+
+假設 thread T1 執行第一段路徑並已取得 lock A，thread T2 執行第二段路徑並已取得 lock B。 接下來 T1 嘗試取得 lock B，而 T2 嘗試取得 lock A。 此時這兩次 `acquire` 都會無限期阻塞，因為它們彼此持有對方需要的 lock，且只有等到 `acquire` 成功後才會釋放原本的 lock
+
+為了避免這種死結情況，所有程式路徑都必須依照相同的順序取得 lock。 這也意味著每一把 lock 的取得順序事實上是每個函式行為規格的一部分：呼叫者必須以符合整體約定的方式來使用這些函式，確保 lock 的取得順序一致
+
+由於 `sleep` 的實作方式（詳見第七章），xv6 中有許多長度為 2 的 lock-order chain，這涉及到每個 process 的 lock（也就是每個 `struct proc` 中的那把 lock）。 舉例來說，`consoleintr`（[kernel/console.c:136](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/console.c#L136)）是處理鍵盤輸入中斷的函式。 當接收到換行字元時，所有正在等待 console 輸入的 process 都應該被喚醒。 為了達成這點，`consoleintr` 會在持有 `cons.lock` 的情況下呼叫 `wakeup`，而 `wakeup` 在喚醒某個 process 時會取得該 process 的 lock
+
+因此，xv6 為了避免死結，規定全域的 lock 順序中必須先取得 `cons.lock`，然後才可以取得任何的 process lock。 而在檔案系統中，xv6 則有最長的 lock chain。 例如在建立檔案時，需要同時持有該目錄的 lock、新檔案 inode 的 lock、一個 disk block buffer 的 lock、磁碟驅動程式的 `vdisk_lock`，以及呼叫者的 `p->lock`。 為了避免死結，檔案系統程式碼必須依照前述順序來依次取得這些 lock
+
+要遵守全域的、避免死結的 lock 取得順序，其實比想像中困難。 某些時候，這樣的 lock 順序會與程式邏輯的結構衝突。 例如，某個模組 M1 呼叫另一個模組 M2，但 lock 的順序卻要求先取得 M2 的 lock，才能取得 M1 的 lock。 也有時候，在事前根本不知道下一把要取得的 lock 是哪一個，因為可能必須先持有某把 lock 才能知道下一個要鎖的是誰
+
+這種情況會出現在檔案系統中，像是在依序解析路徑名稱的每一層時會發生，也會出現在 `wait` 與 `exit` 搜尋 process table 中的子行程時。 最後，避免死結的需求也常常限制了 lock 粒度的細緻程度，因為使用越多的 lock，死結發生的機會也越高。 事實上，如何避免死結，常常是 kernel 實作時的一個主要考量因素
