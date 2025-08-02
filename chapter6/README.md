@@ -298,3 +298,11 @@ xv6 提供了 sleep-lock 來滿足這個需求。 `acquiresleep`（[kernel/sleep
 3. 如果兩個 CPU 同時呼叫 `kalloc`，其中一個必須等待另一個，這對效能是有害的。 請修改 kalloc.c 增加並行性，使得不同 CPU 上的 `kalloc` 呼叫可以同時進行，而不必互相等待
 4. 使用 POSIX threads 撰寫一個平行程式（大多數作業系統都有支援）。 例如你可以實作一個平行的 hash table，並測量當 CPU 數增加時，put/get 的數量是否能跟著擴張
 5. 在 xv6 上實作一個簡化版的 Pthreads。 也就是實作一個使用者層級的 thread library，使得一個使用者行程可以有不只一個 thread，並安排這些 thread 可以在不同 CPU 上平行執行。 請設計一套正確處理 blocking system call 與共享位址空間改動的方案
+
+## Bibliography
+
+- <a id="1">[1]</a>：The RISC-V instruction set manual Volume I: unprivileged specification ISA. https://drive.google.com/file/d/17GeetSnT5wW3xNuAHI95-SI1gPGd5sJ_/view?usp=drive_link, 2024.
+- <a id="2">[2]</a>：Hans-J Boehm. Threads cannot be implemented as a library. ACM PLDI Conference, 2005.
+- <a id="3">[3]</a>：L Lamport. A new solution of dijkstra’s concurrent programming problem. Communications of the ACM, 1974.
+- <a id="4">[4]</a>：Maurice Herlihy and Nir Shavit. The Art of Multiprocessor Programming, Revised Reprint. 2012.
+- <a id="5">[5]</a>：Paul E. Mckenney, Silas Boyd-wickizer, and Jonathan Walpole. RCU usage in the linux kernel: One decade later, 2013.
