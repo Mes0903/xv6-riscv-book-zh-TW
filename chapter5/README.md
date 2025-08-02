@@ -31,6 +31,45 @@ xv6 的 `main` 會呼叫 `consoleinit`（[kernel/console.c:182](https://github.c
 
 xv6 的 shell 會透過一個由 `init.c` 所開啟的 file descriptor（[user/init.c:19](https://github.com/mit-pdos/xv6-riscv/blob/riscv//user/init.c#L19)）來從 console 讀取資料。 對 `read` system call 的呼叫會一路進入 kernel，最後到達 `consoleread`（[kernel/console.c:80](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/console.c#L80)）。 `consoleread` 會等待輸入透過中斷抵達，並將輸入暫存到 `cons.buf` 中，然後將輸入複製到 user space，並在整行輸入完成後才回傳給 user process。 若使用者尚未輸入完整的一行，任何呼叫 `read` 的 process 都會停在 `sleep`（[kernel/console.c:96](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/console.c#L96)）呼叫中，第七章節會再詳細說明 `sleep` 的運作
 
+::: tip  
+`read` 系統呼叫的實作為 `sys_read`，內部最後會呼叫 `fileread`，而 `fileread` 會根據 `file` 這個結構體內的成員 `major` 來判斷要怎麼讀取這個 file descriptor：
+
+```c
+// Read from file f.
+// addr is a user virtual address.
+int
+fileread(struct file *f, uint64 addr, int n)
+{
+  ...
+  } else if(f->type == FD_DEVICE){
+    if(f->major < 0 || f->major >= NDEV || !devsw[f->major].read)
+      return -1;
+    r = devsw[f->major].read(1, addr, n);
+  ...
+  return r;
+}
+```
+
+而在 `consoleinit` 中會將它接到 `consoleread`：
+
+```c
+void
+consoleinit(void)
+{
+  initlock(&cons.lock, "cons");
+
+  uartinit();
+
+  // connect read and write system calls
+  // to consoleread and consolewrite.
+  devsw[CONSOLE].read = consoleread;
+  devsw[CONSOLE].write = consolewrite;
+}
+```
+
+而前面有說 `init.c` 會開一個 file descriptor 來從 console 讀取資料，其底層就是對應到 `CONSOLE`。 因此可知讀取 console 的流程為：`read` → `fileread` → `consoleread`  
+:::
+
 當使用者輸入一個字元時，UART 硬體會要求 RISC-V CPU 產生一個中斷，這會啟動 xv6 的 trap handler。 trap handler 接著會呼叫 `devintr`（[kernel/trap.c:185](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/trap.c#L185)），它會查看 RISC-V 的 `scause` 暫存器，以判斷該中斷是否來自外部裝置。 接著，它會向名為 PLIC 的硬體單元查詢是由哪個裝置產生的中斷（[kernel/trap.c:193](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/trap.c#L193)）； 對於 UART 產生的中斷，`devintr` 會呼叫 `uartintr`
 
 `uartintr`（[kernel/uart.c:177](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/uart.c#L177)）會從 UART 硬體中讀取所有尚未處理的輸入字元，並將這些字元交給 `consoleintr`（[kernel/console.c:136](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/uart.c#L177)）； 它本身不會等待更多輸入，因為未來有新輸入時還會再次觸發新的中斷。 `consoleintr` 的工作是將這些輸入字元累積到 `cons.buf` 中，直到整行輸入完成為止。 `consoleintr` 會特別處理 backspace 與其他一些特殊字元
@@ -43,7 +82,30 @@ xv6 的 shell 會透過一個由 `init.c` 所開啟的 file descriptor（[user/i
 
 每當 UART 傳送完一個 byte，它就會產生一個中斷。 `uartintr` 會呼叫 `uartstart`，這個函式會檢查 UART 是否真的完成傳送，然後把下一個緩衝區中的輸出字元交給 UART 傳送。 因此，如果某個 process 一次寫入多個 byte 到 console，通常第一個 byte 是由 `uartputc` 呼叫 `uartstart` 傳送出去的，其餘在緩衝區裡的 byte 則會由 `uartintr` 在每次中斷到來時持續呼叫 `uartstart` 傳送出去
 
-通常我們會利用「緩衝區」與「中斷」來讓「裝置活動」與【process 活動」解耦。 即使沒有 process 正等著要讀資料，console driver 也能先處理輸入，因此之後的 `read` 呼叫仍然能讀到這些資料。 同樣地，process 也能夠直接輸出資料，而不用等待裝置完成傳送。 這種解耦能提升效能，因為它允許 process 在進行裝置 I/O 的同時繼續執行，而當裝置速度很慢（像 UART）或需要即時反應（像 echo 指定字元）時，這點特別重要。 這種設計理念有時被稱為 I/O 並行（I/O concurrency）
+通常我們會利用「緩衝區」與「中斷」來讓「裝置活動」與「process 活動」解耦。 即使沒有 process 正等著要讀資料，console driver 也能先處理輸入，因此之後的 `read` 呼叫仍然能讀到這些資料。 同樣地，process 也能夠直接輸出資料，而不用等待裝置完成傳送。 這種解耦能提升效能，因為它允許 process 在進行裝置 I/O 的同時繼續執行，而當裝置速度很慢（像 UART）或需要即時反應（像 echo 指定字元）時，這點特別重要。 這種設計理念有時被稱為 I/O 並行（I/O concurrency）
+
+::: tip  
+當我們在 shell 中敲下 `a` 鍵，其流程大概如下：
+
+1. shell 內的 `getcmd` 印出 `$` 提示後會呼叫 `gets`
+    - 其底層會呼叫 `consoleread`，由於 FIFO 為空，因此會進入 sleep 狀態
+2. QEMU 把 `a` 推入 UART FIFO
+3. UART 設置 `LSR_RX_READY` bit → PLIC 送 IRQ
+4. CPU trap → trap vector → trap handler → `devintr()`
+5. `devintr()` → `uartintr()` → 讀 FIFO（透過 `uartgetc()`）
+6. `uartintr()` 呼叫 `consoleintr('a')`
+7. `consoleintr()` 把 `'a'` 放入 `cons.buf` 內
+    - 由於沒有 `'\n'`，所以不會喚醒 `consoleread()`，立即 return
+8. 回到被搶佔前正在執行的行程
+
+其中：
+
+- 第 2、3 步都是硬體（QEMU）處理的
+- 第三步是要走 `kernelvec` 還是 `uservec`，取決於發生 trap 時 CPU 正在哪個 mode 下
+  - 例如如果當時剛好 shell 呼叫了 `read()` 並正睡在 `sleep()` 中，那 CPU 就還處在 kernel space，因此會走 `kernelvec`
+  - 而如果 CPU 已經切去另一個 user process 了，那就會走 `uservec`
+  - 但不管走哪個，最後都會執行到 `devintr`  
+:::
 
 ## 5.3 Concurrency in drivers
 
