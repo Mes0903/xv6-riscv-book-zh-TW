@@ -262,3 +262,17 @@ release(&listlock);  // line 6
 :::
 
 為了告訴硬體與編譯器「不要進行重新排序」，xv6 在 `acquire`（[kernel/spinlock.c:22](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/spinlock.c#L22)）與 release（[kernel/spinlock.c:47](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/spinlock.c#L47)）中都使用了 `__sync_synchronize()` 函式。 這個函式是一種 memory barrier（記憶體屏障），它會要求編譯器與 CPU 不要讓 loads 或 stores 穿越這道屏障而重新排序。 xv6 的 `acquire` 與 `release` 函式中的這些屏障，幾乎在所有重要的情況下都能強制確保正確的執行順序，因為 xv6 會用 lock 包住對共享資料的存取。 不過在第九章中還會討論一些例外情況
+
+## 6.8 Sleep locks
+
+有時候 xv6 需要長時間持有一把鎖。 例如檔案系統（見第八章）在從硬碟讀寫檔案內容時會將檔案上鎖，而這些硬碟操作可能會花上數十毫秒。 若在這段期間持有一把 spinlock，會造成浪費，因為如果其他 process 想取得這把 lock，就會在這段時間中不斷自旋、浪費 CPU 資源。 另一個使用 spinlock 的缺點是，process 在持有 spinlock 時無法讓出 CPU
+
+但我們希望 process 在等待硬碟時能讓出 CPU，好讓其他 process 可以使用，然而在持有 spinlock 時讓出 CPU 是不合法的，因為這可能導致 deadlock：如果此時另一條執行緒也想取得這把 spinlock，而 `acquire` 並不會讓出 CPU，那麼這條執行緒就會自旋，可能阻止原本持有 lock 的執行緒再次執行、從而無法釋放 lock
+
+在持有 lock 的狀態下讓出 CPU，也會違反 spinlock 所要求的「必須關閉中斷」的條件。 因此，我們希望有一種 lock，在等待獲得時可以讓出 CPU，並且在持有 lock 的期間也能讓出 CPU（甚至允許中斷發生）
+
+xv6 提供了 sleep-lock 來滿足這個需求。 `acquiresleep`（[kernel/sleeplock.c:22](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/sleeplock.c#L22)）在等待期間會讓出 CPU，具體機制會在第七章詳細說明。 簡單來說，sleep-lock 內部有一個 `locked` 欄位，由一把 spinlock 保護，`acquiresleep` 中會呼叫 `sleep`，並在這個呼叫中以原子地方式同時讓出 CPU 並釋放 spinlock。 這樣的設計讓其他執行緒可以在 `acquiresleep` 等待期間繼續執行
+
+由於 sleep-lock 不會關閉中斷，因此不能在 interrupt handler 中使用。 又因為 `acquiresleep` 可能會讓出 CPU，所以 sleep-lock 也不能被用在 spinlock 的 critical section 內（不過反過來，spinlock 可以在 sleep-lock 的 critical section 裡使用）
+
+總的來說，spinlock 適合用在短暫的 critical section，因為等待它會浪費 CPU； 而 sleep-lock 則適合用在耗時較長的操作上
