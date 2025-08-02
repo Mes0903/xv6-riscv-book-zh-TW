@@ -232,3 +232,33 @@ spinlock 與中斷的交互作用會帶來潛在的危險。 假設現在 `sys_s
 xv6 會在 CPU 不再持有任何 spinlock 時重新開啟中斷。 為了支援巢狀的 critical section，它必須做一些狀態紀錄。 `acquire` 會呼叫 `push_off`（[kernel/spinlock.c:89](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/spinlock.c#L89)），`release` 則會呼叫 `pop_off`（[kernel/spinlock.c:100](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/spinlock.c#L100)），這兩個函式用來追蹤目前 CPU 上的 lock 巢狀層數。 當這個巢狀層數變成 0 時，`pop_off` 會還原當初進入最外層 critical section 時的中斷狀態。 `intr_off` 與 `intr_on` 則分別對應執行 RISC-V 關閉與開啟中斷的指令
 
 非常重要的一點是，`acquire` 必須在設置 `lk->locked`（[kernel/spinlock.c:28](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/spinlock.c#L28)）之前就先呼叫 `push_off`。 如果順序顛倒，就會出現一個短暫的時間區間，在那期間 lock 已經被持有，但中斷仍然是開啟的，此時若剛好發生中斷，就會導致整個系統死結。 同樣地，也必須在釋放 lock 之後才呼叫 `pop_off`（[kernel/spinlock.c:66](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/spinlock.c#L66)）
+
+## 6.7 Instruction and memory ordering
+
+直覺上我們會認為程式會按照原始碼中語句出現的順序執行。 對於單執行緒的程式碼而言，這種心智模型是合理的，但在多個執行緒透過共享記憶體進行互動時，這個模型就是錯誤的了<sup>[[1]](#1), [[2]](#2)</sup>。 原因之一是：編譯器產生的 load 與 store 的指令順序，可能與原始碼中所暗示的順序不同，甚至可能完全省略某些指令（例如把資料暫存在暫存器中，根本不寫回記憶體）。 另一個原因是 CPU 為了提升效能，可能會重新安排指令的執行順序。 舉例來說，若指令序列中的 A 與 B 彼此沒有依賴性，那麼 CPU 可能會先執行 B，這可能是因為 B 的輸入比較早準備好，或是為了與 A 的執行重疊來增加平行性
+
+來看看以下 `push` 的實作，它展示了可能出錯的情境。 如果編譯器或 CPU 把第 4 行的 store 操作移到第 6 行的 `release` 之後，那會造成災難性的後果：
+
+```c
+l = malloc(sizeof *l);
+l->data = data;
+acquire(&listlock);
+l->next = list;   // line 4
+list = l;
+release(&listlock);  // line 6
+```
+
+如果真的發生這樣的重新排序，那就會出現一個短暫的時間區間，期間其他 CPU 可能取得這把 lock，並看到已更新的 list，但此時的 `list->next` 還未被初始化
+
+好消息是，編譯器與 CPU 都會遵循一套稱為 memory model（記憶體模型）的規則，來幫助並行程式設計者。 此外它們也提供一些原語（primitives），讓程式設計者能控制重新排序的行為
+
+::: tip  
+儘管存在重新排序的風險，但作業系統或語言層提供了記憶體模型（如 C/C++11 memory model、RISC-V memory model）來讓這些行為可預測。 更進一步的工具像是：
+
+- memory barriers / fences：指令級別的排序限制
+- atomic operations：具有特定順序語意的同步原語
+
+這些工具能幫助開發者明確告訴 CPU/編譯器「不要進行重新排序」  
+:::
+
+為了告訴硬體與編譯器「不要進行重新排序」，xv6 在 `acquire`（[kernel/spinlock.c:22](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/spinlock.c#L22)）與 release（[kernel/spinlock.c:47](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/spinlock.c#L47)）中都使用了 `__sync_synchronize()` 函式。 這個函式是一種 memory barrier（記憶體屏障），它會要求編譯器與 CPU 不要讓 loads 或 stores 穿越這道屏障而重新排序。 xv6 的 `acquire` 與 `release` 函式中的這些屏障，幾乎在所有重要的情況下都能強制確保正確的執行順序，因為 xv6 會用 lock 包住對共享資料的存取。 不過在第九章中還會討論一些例外情況
