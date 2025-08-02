@@ -67,3 +67,219 @@ xv6 為 scheduler 使用了獨立的 thread（各自擁有暫存器與 stack 的
 
 而對於文中的例子，由於它是由 `sched` 去呼叫 `swtch`，所以 `new` 填的會是 `&mycpu()->context`，也就是一個 pre-CPU 的 scheduler context  
 :::
+
+## 7.3 Code: Scheduling
+
+上一節我們探討了 `swtch` 的底層細節； 現在我們把來觀察 process 的 kernel thread 是如何透過 scheduler 切換到另一個 process 的。 scheduler 是每顆 CPU 上的一個特殊的 thread，這個 thread 執行的是 `scheduler` 函式。 這個函式會負責選出下一個要執行的 process。 當某個 process 想放棄 CPU 時，它必須先取得自己的 process lock `p->lock`，釋放它持有的其他 lock，更新自己的狀態（`p->state`），然後呼叫 `sched`。 你可以在 `yield`（[kernel/proc.c:512](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/proc.c#L512)）、`sleep` 和 `exit` 中看到這個流程
+
+接著 `sched` 會再次確認這些條件是否已被滿足（[kernel/proc.c:496-501](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/proc.c#L496-L501)），並檢查一個隱含的條件：既然有持有鎖，則必須確保中斷已被關閉。 最後，`sched` 呼叫 `swtch`，將當前的 context 存入 `p->context`，並切換到 `cpu->context` 中的 scheduler context。 `swtch` 返回時會回到 scheduler 的 stack，就好像當初 scheduler 呼叫的 `swtch` 返回了一樣（[kernel/proc.c:466](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/proc.c#L466)）。 然後 scheduler 繼續它的 for 迴圈，找下一個 process 來執行，再切換過去，如此反覆循環
+
+::: tip  
+- `scheduler()` 是每顆 CPU 的主控 loop，會尋找 runnable process，並執行它
+- 被執行的 process 如果想釋放 CPU（例如主動呼叫 `yield`、被 `sleep` 阻塞、或是 `exit`），就會開始切換流程
+- 這時 `sched()` 函式會做兩件事：確認合法狀態、呼叫 `swtch` 並切回 scheduler
+
+此處 `swtch` 不是隨便 return 的，而是會直接回到當初 `scheduler()` 呼叫 `swtch()` 的那一點，這依賴於之前 `scheduler()` 有正確地保存自己的 context  
+:::
+
+我們剛剛看到 xv6 在呼叫 `swtch` 的整個過程中會持續持有 `p->lock`：呼叫 `swtch` 的程式碼必須事先持有這把 lock，並且這把 lock 的控制權會一併傳給被切換過去的程式碼。 這樣的安排並不常見：更常見的做法是持有鎖的一方同時負責釋放它。 但 xv6 不能這樣做，因為 `p->lock` 保護了 `p->state` 與 `p->context` 欄位的狀態不變性，而這些不變性在執行 `swtch` 的時候會被暫時破壞掉
+
+例如，如果在執行 `swtch` 期間沒有持有 `p->lock`，那麼另一顆 CPU 可能會在 `yield` 將 process 狀態設為 `RUNNABLE` 之後、但 `swtch` 還沒釋出 stack 之前，就搶先執行這個 process，導致兩個 CPU 同時在用同一個 stack，造成災難
+
+因此，一旦 `yield` 開始修改 process 的狀態，使它變成 `RUNNABLE`，那就必須持續持有 `p->lock`，直到系統恢復狀態一致為止：最早能釋放 lock 的時間點是在 scheduler（它使用自己的 stack 執行）清除 `c->proc` 之後。 反過來說，當 scheduler 開始把某個 `RUNNABLE` process 轉換成 `RUNNING` 時，也不能在 `swtch` 之前釋放 lock，而是要等到 process 的 kernel thread 真正開始執行（例如在 `yield` 裡）之後才行
+
+kernel thread 唯一會放棄 CPU 的地方是在 `sched`，而它總會切換回 scheduler 中的同一段位置，然後 scheduler 幾乎又總會切換到某個先前呼叫過 `sched` 的 kernel thread。 因此，如果你列印出 xv6 切換執行緒所在的行號，你會看到一個很簡單的模式：466、506、466、506，這樣反覆。 這種透過 thread switch 有意地把控制權交給彼此的程式，有時被稱作 coroutines； 在這個例子中，`sched` 和 `scheduler` 就是彼此的 coroutine
+
+::: tip  
+假設 CPU 0 上的 process A 呼叫了 `yeild` 放棄 CPU，此時在 `yeild` 內會將 `p->lock` 上鎖，將 `p->state` 改成 `RUNNABLE`，然後呼叫 `sched`：
+
+```c
+// Give up the CPU for one scheduling round.
+void
+yield(void)
+{
+  struct proc *p = myproc();
+  acquire(&p->lock);
+  p->state = RUNNABLE;
+  sched();
+  release(&p->lock);
+}
+```
+
+接著 `sched` 會呼叫 `swtch`：
+
+```c
+// Switch to scheduler.  Must hold only p->lock
+// and have changed proc->state. Saves and restores
+// intena because intena is a property of this
+// kernel thread, not this CPU. It should
+// be proc->intena and proc->noff, but that would
+// break in the few places where a lock is held but
+// there's no process.
+void
+sched(void)
+{
+  int intena;
+  struct proc *p = myproc();
+
+  if(!holding(&p->lock))
+    panic("sched p->lock");
+  if(mycpu()->noff != 1)
+    panic("sched locks");
+  if(p->state == RUNNING)
+    panic("sched RUNNING");
+  if(intr_get())
+    panic("sched interruptible");
+
+  intena = mycpu()->intena;
+  swtch(&p->context, &mycpu()->context);
+  mycpu()->intena = intena;
+}
+```
+
+而如前面所述，`swtch` 本身只做 context 的儲存與還原，然後 return，這裡 `ret` 會回到 scheduler context：
+
+```asm
+swtch:
+        sd ra, 0(a0)
+        sd sp, 8(a0)
+        sd s0, 16(a0)
+        sd s1, 24(a0)
+        sd s2, 32(a0)
+        sd s3, 40(a0)
+        sd s4, 48(a0)
+        sd s5, 56(a0)
+        sd s6, 64(a0)
+        sd s7, 72(a0)
+        sd s8, 80(a0)
+        sd s9, 88(a0)
+        sd s10, 96(a0)
+        sd s11, 104(a0)
+
+        ld ra, 0(a1)
+        ld sp, 8(a1)
+        ld s0, 16(a1)
+        ld s1, 24(a1)
+        ld s2, 32(a1)
+        ld s3, 40(a1)
+        ld s4, 48(a1)
+        ld s5, 56(a1)
+        ld s6, 64(a1)
+        ld s7, 72(a1)
+        ld s8, 80(a1)
+        ld s9, 88(a1)
+        ld s10, 96(a1)
+        ld s11, 104(a1)
+        
+        ret
+```
+
+但在執行 `swtch` 的期間，context 還沒搬完，到目前整個流程都還跟一般的 function call 一樣，所以 CPU 0 還處在 process A 的 stack 上。 此時如果 CPU 1 正在執行 `scheduler`，看到 process A 的 `p->state` 為 `RUNNABLE`，就有可能嘗試呼叫 `acquire(p->lock)` 並把它抓進去執行，成功的話兩個 CPU 就會同時執行 process A 且共用了它的 stack，因此才要上鎖，讓 `acquire(p->lock)` 失敗
+
+下面為 `scheduler` 的實作：
+
+```c
+// Per-CPU process scheduler.
+// Each CPU calls scheduler() after setting itself up.
+// Scheduler never returns.  It loops, doing:
+//  - choose a process to run.
+//  - swtch to start running that process.
+//  - eventually that process transfers control
+//    via swtch back to the scheduler.
+void
+scheduler(void)
+{
+  struct proc *p;
+  struct cpu *c = mycpu();
+
+  c->proc = 0;
+  for(;;){
+    // The most recent process to run may have had interrupts
+    // turned off; enable them to avoid a deadlock if all
+    // processes are waiting. Then turn them back off
+    // to avoid a possible race between an interrupt
+    // and wfi.
+    intr_on();
+    intr_off();
+
+    int found = 0;
+    for(p = proc; p < &proc[NPROC]; p++) {
+      acquire(&p->lock);
+      if(p->state == RUNNABLE) {
+        // Switch to chosen process.  It is the process's job
+        // to release its lock and then reacquire it
+        // before jumping back to us.
+        p->state = RUNNING;
+        c->proc = p;
+        swtch(&c->context, &p->context);
+
+        // Process is done running for now.
+        // It should have changed its p->state before coming back.
+        c->proc = 0;
+        found = 1;
+      }
+      release(&p->lock);
+    }
+    if(found == 0) {
+      // nothing to run; stop running on this core until an interrupt.
+      asm volatile("wfi");
+    }
+  }
+}
+```
+
+可以看到在內層的 for loop 中會先呼叫 `acquire`，然後才會確認 `p->state` 是不是 `RUNNABLE` 的。 這邊雖然會依序對 process array 中的每個 process 做 `acquire`，但這其實並沒有關係，不會有卡住的問題，因為大部分的時候 `p->lock` 是空閒的，process 在 user space 跑的時候不會上鎖，只有在向上面 `swtch` 這種期間才會持鎖  
+
+再來你會看到 `yield` 裡面在 `sched` 之後還呼叫了 `release(&p->lock)`，而其對應的 `sched` 內，在 `swtch(&p->context, &mycpu()->context)` 之後做了 `mycpu()->intena = intena;` 這件事
+
+這是因為當 process A 被換出 CPU 0 時，其儲存的位置是在 `swtch(&p->context, &mycpu()->context)` 這行，因此之後 process A 被換回來的時候，它會依序再由原路徑返回，下面是一個示意用的流程（我畫好久）：
+
+```lua
+Process A
+├─ ...
+└─ yield()
+   ├─ acquire(A.lock)                                            ← A 上鎖
+   ├─ A.state = RUNNABLE
+   └─ sched()
+      └─ swtch(&p->context, &cpu->scheduler)                     ← 鎖仍在 A 手上
+          └─► 進入 scheduler()  (CPU 專屬 stack)
+              ├─ c->proc = 0;
+              ├─ found = 1;
+              ├─ release(A.lock)                                 ← 第一次釋放 A 的鎖
+              ├─ for 迴圈掃表，找到 Process B
+              ├─ acquire(B.lock)
+              ├─ B.state = RUNNING
+              └─ swtch(&cpu->scheduler, &B.context)
+                  └─► 進入 Process B（執行一段時間…）
+                      … B 透過 yield()/sleep() 等放棄 CPU …
+                  ◄─ 回到 scheduler()
+                      ├─ c->proc = 0
+                      ├─ found = 1;
+                      ├─ release(B.lock)
+                      ├─ 找到 Process A (再次 acquire(A.lock))    ← A 再度上鎖
+                      ├─ p->state = RUNNING
+                      └─ swtch(&cpu->scheduler, &p->context)
+                          └─► 回到 Process A 的 sched()
+
+      ◄─ 回到 sched()         (A 的 kernel stack)
+         ├─ mycpu()->intena = intena
+         └─ return 回到 yield()
+
+   ◄─ yield() 尾端
+      └─ release(A.lock)                                         ← 第二次釋放 A 的鎖
+```  
+:::
+
+有一種情況下，scheduler 呼叫 `swtch` 後不會進入 `sched`。 `allocproc` 會把新 process 的 context 中的 `ra` 設為 `forkret`（[kernel/proc.c:524](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/proc.c#L524)），這樣這個 process 第一次被切入時，`swtch` 就會「return」到那個函式的開頭。 `forkret` 的存在是為了釋放 `p->lock`； 否則，因為這個新 process 需要回到 user space（就像從 fork return 一樣），它本來可以直接從 `usertrapret` 開始執行
+
+::: tip  
+這是 fork 新 process 的特殊處理：
+
+- 新 process 還沒有執行過，所以它沒有先前的 `swtch` return 點
+- `allocproc` 人為設一個 `context.ra = forkret`，讓第一次執行時 `swtch` 能跳進去
+- `forkret` 的任務是先完成 kernel 端的收尾（例如釋放鎖），然後才進入 `usertrapret`，跳回 user space
+
+這樣做可讓新建 process 也能使用與其他 process 相同的切換邏輯  
+:::
+
+`scheduler`（[kernel/proc.c:445](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/proc.c#L445)）會跑一個無限迴圈：找出一個可執行的 process，執行它直到它釋放 CPU，再重複這個流程。 scheduler 會遍歷整個 process table，尋找狀態為 `RUNNABLE` 的 process。 一旦找到，它會設置這顆 CPU 的 `c->proc` 指標，將該 process 的狀態設為 `RUNNING`，然後呼叫 `swtch` 開始執行它（[kernel/proc.c:461-466](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/proc.c#L461-L466)）
