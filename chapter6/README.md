@@ -11,9 +11,9 @@ category:
 
 # xv6 riscv book chapter 6：Locking
 
-包括 xv6 的大多數 kernel，在執行時都會交錯進行多個活動。 造成交錯的其中一個原因是多核心的硬體：例如 xv6 的 RISC-V 支援多個獨立執行的 CPU。 這些 CPU 會共用實體 RAM，而 xv6 會善用這樣的特性來維護那些所有 CPU 都會讀寫的資料結構。 這種共用會產生一個問題，就是當某個 CPU 正在讀某個資料結構的同時，另一個 CPU 可能正好在修改它，甚至可能有多個 CPU 同時在修改同一筆資料
+包括 xv6 的大多數 kernel，在執行時都會交錯進行多個活動。 造成交錯的其中一個原因是多核的硬體：例如 xv6 的 RISC-V 支援多個獨立執行的 CPU。 這些 CPU 會共用實體 RAM，而 xv6 會善用這樣的特性來維護那些所有 CPU 都會讀寫的資料結構。 這種共用會產生一個問題，就是當某個 CPU 正在讀某個資料結構的同時，另一個 CPU 可能正好在修改它，甚至可能有多個 CPU 同時在修改同一筆資料
 
-若沒有謹慎設計，這種平行存取很可能導致錯誤的結果，甚至破壞資料結構。 即便在單核心系統中，kernel 也可能在多個執行緒之間切換，使得它們的執行交錯進行。 最後，若某個裝置的 interrupt handler 與可被中斷的程式碼會修改同一份資料，而中斷剛好在不恰當的時機發生，則也可能會破壞資料。 並行（concurrency）這個詞就是指這種多條指令流因為多核心平行處理、執行緒切換，或中斷而產生交錯的情況
+若沒有謹慎設計，這種平行存取很可能導致錯誤的結果，甚至破壞資料結構。 即便在單核心系統中，kernel 也可能在多個執行緒之間切換，使得它們的執行交錯進行。 最後，若某個裝置的 interrupt handler 與可被中斷的程式碼會修改同一份資料，而中斷剛好在不恰當的時機發生，則也可能會破壞資料。 並行（concurrency）這個詞就是指這種多條指令流因為多核平行處理、執行緒切換，或中斷而產生交錯的情況
 
 kernel 中充滿了會被並行存取的資料。 舉例來說，兩個 CPU 可能會同時呼叫 `kalloc`，導致它們同時從 free list 的開頭取出項目。 kernel 的設計者傾向允許大量的並行，因為這樣可以透過平行運作提升效能，也能讓系統的反應更快。 但也因此，設計者必須在這樣的並行條件下，確保系統的正確性。 要寫出正確的程式碼有很多方法，也有一些較簡單的方法。 在並行情況下確保正確性的策略，以及支援這些策略的抽象機制，統稱為並行控制（concurrency control）技術
 
@@ -79,9 +79,9 @@ push(int data)
 }
 ```
 
-在 `acquire` 與 `release` 之間的這段程式碼稱為臨界區（critical section）。 我們通常會說「用這把 lock 來保護該 list」
+在 `acquire` 與 `release` 之間的這段程式碼稱為臨界區（critical section）
 
-當我們說某個 lock 保護某筆資料時，我們實際上是指這個 lock 保護了一組描述這筆資料不變式（invariants），不變式是資料結構在不同操作之間需要維持的「性質」。 通常，一個操作是否正確，會仰賴操作開始時那些不變式是否成立。 這個操作可能會在執行過程中暫時破壞這些不變式，但它必須在結束前再次恢復它們。 舉例來說，在 linked list 的例子中，不變式包括 `list` 應該指向串列的第一個節點，且每個節點的 `next` 欄位應該指向下一個節點
+我們通常說某個 lock 保護了某筆資料，這種時候實際上是指這個 lock 保護了一組描述這筆資料不變式（invariants），不變式是資料結構在不同操作之間需要維持的「性質」。 通常，一個操作是否正確，會仰賴於操作開始時那些不變式是否成立。 這個操作可能會在執行過程中暫時破壞這些不變式，但它必須在結束前再次恢復它們。 舉例來說，在 linked list 的例子中，不變式包括 `list` 應該指向串列的第一個節點，且每個節點的 `next` 欄位應該指向下一個節點
 
 在 `push` 的實作中，這個不變式會被暫時打破：在 `l->next = list` 處，`l` 就已經指向了下一個節點，但此時 `list` 還沒指向 `l`（直到 `list = l` 才重新建立起來）。 前面我們討論的 race 發生的原因就是有另一個 CPU 在這些不變式暫時無效時執行了依賴於它們的操作。 正確使用 lock 可以確保任何時刻只有一個 CPU 可以在臨界區內操作資料結構，從而避免在不變式尚未成立的情況下執行錯誤的操作
 
@@ -95,7 +95,7 @@ lock 的放置位置對效能也很重要。 舉例來說，雖然把 `push` 中
 
 ## 6.2 Code: Locks
 
-xv6 有兩種類型的 lock：spinlock 和 sleep-lock。 我們先從 spinlock 開始介紹，xv6 用一個 `struct spinlock` 來表示一個 spinlock（[kernel/spinlock.h:2](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/spinlock.h#L2)）。 這個結構中最重要的欄位是 `locked`，當這個欄位為 0 表示 lock 是可用的，非零則表示 lock 已被持有。 從邏輯上來說，xv6 應該該可以透過如下的程式碼來取得一把 lock：
+xv6 有兩種類型的 lock：spinlock 和 sleep-lock。 我們先從 spinlock 開始介紹，xv6 用一個 `struct spinlock` 來表示一個 spinlock（[kernel/spinlock.h:2](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/spinlock.h#L2)）。 這個結構中最重要的欄位是 `locked`，當這個欄位為 0 表示 lock 是可用的，非零則表示 lock 已被持有。 從邏輯上來說，取得一把 lock 的實作可能長這樣：
 
 ```c
 void
@@ -110,14 +110,14 @@ acquire(struct spinlock *lk) // does not work!
 }
 ```
 
-不幸的是，這段實作在多核心系統中無法保證互斥（mutual exclusion）。 有可能兩個 CPU 同時執行到 `if(lk->locked == 0)` 這一行，都發現 `lk->locked` 為 0，然後都執行 `assign` 將它設為 1，結果就是兩個不同的 CPU 都以為自己取得了這把 lock，這違反了互斥的基本原則。 因此我們需要一種能讓 lock 的判斷和 lock 的索取這兩行變成一個 atomic（不可分割）操作的方法
+不幸的是，這段實作在多核系統中無法保證互斥（mutual exclusion）。 可能會有兩個 CPU 同時執行到 `if(lk->locked == 0)` 這一行，且都發現 `lk->locked` 為 0，然後都執行 `assign` 將它設為 1，結果就是兩個不同的 CPU 都以為自己取得了這把 lock，這違反了互斥的基本原則。 因此我們需要一種能讓 lock 的判斷和 lock 的索取這兩行變成一個原子（不可分割）操作的方法
 
-由於 lock 的使用非常普遍，多核心處理器通常會提供某些指令，來實作判斷與索取 lock 的原子版本。 RISC-V 提供了 `amoswap r, a` 這條指令，其會讀取記憶體位址 `a` 的內容，然後將暫存器 `r` 的值寫入該位址，並把原先記憶體中的值存回 `r`。 換句話說，它會原子性地交換暫存器和記憶體位址的內容。這個過程是不可中斷的，硬體會確保在這個讀寫過程中沒有其他 CPU 介入存取這塊記憶體
+由於 lock 的使用非常普遍，多核處理器通常會提供某些指令，來實作判斷與索取 lock 的原子版本。 RISC-V 提供了 `amoswap r, a` 這條指令，其會讀取記憶體位址 `a` 的內容，然後將暫存器 `r` 的值寫入該位址，並把原先記憶體中的值存回 `r`。 換句話說，它會原子性地交換暫存器和記憶體位址的內容。這個過程是不可中斷的，硬體會確保在這個讀寫過程中沒有其他 CPU 介入存取這塊記憶體
 
-xv6 的 `acquire`（[kernel/spinlock.c:22](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/spinlock.c#L22)）函式使用了一個可移植的 C 函式 `__sync_lock_test_and_set`，它的底層實作會轉換成 `amoswap` 指令； 這個函式會回傳 `lk->locked` 這個欄位的舊值（也就是 swap 前的值）。 `acquire` 函式會將這個 swap 操作包在一個迴圈裡，不斷重試（自旋），直到成功取得 lock 為止
+xv6 的 `acquire`（[kernel/spinlock.c:22](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/spinlock.c#L22)）函式使用了一個可移植的 C 函式 `__sync_lock_test_and_set`，它的底層實作會轉換成 `amoswap` 指令； 這個函式會回傳 `lk->locked` 這個欄位的舊值（也就是 swap 前的值）。 `acquire` 會將這個 swap 操作包在一個迴圈裡，不斷重試（自旋），直到成功取得 lock 為止
 
 每次迴圈都會嘗試將 1 寫入 `lk->locked`，並檢查它原本的值； 如果原本的值是 0，代表我們成功取得了 lock，且這次的 swap 會將 `lk->locked` 設為 1。 如果原本的值是 1，代表有其他 CPU 已經持有這把 lock，而這次我們雖然也執行了 swap，把 1 寫了進去，但其並沒有改變原來的值（都是 1）
 
-當成功取得 lock 後，`acquire` 會紀錄是哪個 CPU 取得了這把 lock，這是為了除錯用途。 `lk->cpu` 這個欄位是由 lock 所保護的，因此只能在持有該 lock 的情況下修改它
+為了除錯用途，當成功取得 lock 後，`acquire` 會紀錄是哪個 CPU 取得了這把 lock（`lk->cpu`）。 `lk->cpu` 這個欄位也會被該 lock（`lk`）保護，因此只能在持有該 lock 的情況下修改它
 
-`release`（[kernel/spinlock.c:47](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/spinlock.c#L47)）函式與 `acquire` 相反：它會先清空 `lk->cpu` 欄位，然後釋放 lock。 從概念上來看，釋放 lock 只需要將 `lk->locked` 設為 0 就可以了。 不過 C 語言標準允許編譯器用多個 store 指令來實作一次 assignment，所以這樣的賦值在多執行緒環境下可能不是 atomic 的。 為了避免這個問題，`release` 使用了 C 標準庫中的 `__sync_lock_release` 函式，這個函式會做一個原子性的賦值，它的底層也會轉換成 RISC-V 的 `amoswap` 指令
+`release`（[kernel/spinlock.c:47](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/spinlock.c#L47)）函式與 `acquire` 相反：它會先清空 `lk->cpu` 欄位，然後釋放 lock。 從概念上來看，釋放 lock 只需要將 `lk->locked` 設為 0 就可以了。 但是 C 語言標準允許編譯器用多個 store 指令來實作單個 assignment，所以賦值操作在多執行緒的環境下可能不會是 atomic 的。 為了避免這個問題，`release` 使用了 C 標準庫中的 `__sync_lock_release` 函式，這個函式會做原子性的賦值以將 `lk->locked` 設為 0，它的底層也會轉換成 RISC-V 的 `amoswap` 指令
