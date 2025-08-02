@@ -92,3 +92,32 @@ push(int data)
 kernel 設計中一大挑戰就是如何在追求平行化的同時避免 lock contention。 xv6 在這方面的設計比較少，但較進階的 kernel 則會特別針對資料結構與演算法設計來避免 contention。 以 list 為例，有些 kernel 會為每個 CPU 維護一個獨立的 free list，只有在當前 CPU 的 list 是空的情況下，才會去「偷取」別的 CPU 的記憶體。 其他應用場景則可能需要更複雜的設計
 
 lock 的放置位置對效能也很重要。 舉例來說，雖然把 `push` 中的 `acquire` 移到更早的位置（例如放在 `l = malloc(sizeof *l)` 前）也是正確的作法，但這麼做可能會降低效能，因為這樣 `malloc` 的呼叫也會被序列化。 下面的「Using locks」小節會提供一些指引，說明該如何選擇 `acquire` 和 `release` 的插入位置
+
+## 6.2 Code: Locks
+
+xv6 有兩種類型的 lock：spinlock 和 sleep-lock。 我們先從 spinlock 開始介紹，xv6 用一個 `struct spinlock` 來表示一個 spinlock（[kernel/spinlock.h:2](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/spinlock.h#L2)）。 這個結構中最重要的欄位是 `locked`，當這個欄位為 0 表示 lock 是可用的，非零則表示 lock 已被持有。 從邏輯上來說，xv6 應該該可以透過如下的程式碼來取得一把 lock：
+
+```c
+void
+acquire(struct spinlock *lk) // does not work!
+{
+  for(;;) {
+    if(lk->locked == 0) {
+      lk->locked = 1;
+      break;
+    }
+  }
+}
+```
+
+不幸的是，這段實作在多核心系統中無法保證互斥（mutual exclusion）。 有可能兩個 CPU 同時執行到 `if(lk->locked == 0)` 這一行，都發現 `lk->locked` 為 0，然後都執行 `assign` 將它設為 1，結果就是兩個不同的 CPU 都以為自己取得了這把 lock，這違反了互斥的基本原則。 因此我們需要一種能讓 lock 的判斷和 lock 的索取這兩行變成一個 atomic（不可分割）操作的方法
+
+由於 lock 的使用非常普遍，多核心處理器通常會提供某些指令，來實作判斷與索取 lock 的原子版本。 RISC-V 提供了 `amoswap r, a` 這條指令，其會讀取記憶體位址 `a` 的內容，然後將暫存器 `r` 的值寫入該位址，並把原先記憶體中的值存回 `r`。 換句話說，它會原子性地交換暫存器和記憶體位址的內容。這個過程是不可中斷的，硬體會確保在這個讀寫過程中沒有其他 CPU 介入存取這塊記憶體
+
+xv6 的 `acquire`（[kernel/spinlock.c:22](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/spinlock.c#L22)）函式使用了一個可移植的 C 函式 `__sync_lock_test_and_set`，它的底層實作會轉換成 `amoswap` 指令； 這個函式會回傳 `lk->locked` 這個欄位的舊值（也就是 swap 前的值）。 `acquire` 函式會將這個 swap 操作包在一個迴圈裡，不斷重試（自旋），直到成功取得 lock 為止
+
+每次迴圈都會嘗試將 1 寫入 `lk->locked`，並檢查它原本的值； 如果原本的值是 0，代表我們成功取得了 lock，且這次的 swap 會將 `lk->locked` 設為 1。 如果原本的值是 1，代表有其他 CPU 已經持有這把 lock，而這次我們雖然也執行了 swap，把 1 寫了進去，但其並沒有改變原來的值（都是 1）
+
+當成功取得 lock 後，`acquire` 會紀錄是哪個 CPU 取得了這把 lock，這是為了除錯用途。 `lk->cpu` 這個欄位是由 lock 所保護的，因此只能在持有該 lock 的情況下修改它
+
+`release`（[kernel/spinlock.c:47](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/spinlock.c#L47)）函式與 `acquire` 相反：它會先清空 `lk->cpu` 欄位，然後釋放 lock。 從概念上來看，釋放 lock 只需要將 `lk->locked` 設為 0 就可以了。 不過 C 語言標準允許編譯器用多個 store 指令來實作一次 assignment，所以這樣的賦值在多執行緒環境下可能不是 atomic 的。 為了避免這個問題，`release` 使用了 C 標準庫中的 `__sync_lock_release` 函式，這個函式會做一個原子性的賦值，它的底層也會轉換成 RISC-V 的 `amoswap` 指令
