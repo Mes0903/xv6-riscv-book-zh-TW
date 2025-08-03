@@ -8,7 +8,7 @@
 - [x] （43~52, 10p）Chapter4：Traps and system calls
 - [x] （53~58, 6p）Chapter 5：Interrupts and device drivers
 - [x] （59~70, 12p）Chapter 6：Locking
-- [ ] （71~84, 14p）Chapter 7：Scheduling
+- [x] （71~84, 14p）Chapter 7：Scheduling
 - [ ] （85~102, 18p）Chapter 8：File system
 - [ ] （103~106, 4p）Chapter 9：Concurrency revisited
 - [ ] （107~109, 3p）Chapter 10：Summary
