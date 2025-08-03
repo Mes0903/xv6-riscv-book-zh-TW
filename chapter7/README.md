@@ -678,3 +678,30 @@ wait(uint64 addr)
 如果目標 process 此時正在 `sleep`，那麼 `kill` 呼叫 `wakeup` 就會讓它從 `sleep` 返回。 這其實是有潛在風險的，因為原本等待的條件可能仍然不成立。 不過，在 xv6 裡，所有對 `sleep` 的呼叫都包在一個 while 迴圈中，`sleep` 返回之後會重新檢查條件。 有些 `sleep` 的呼叫還會在迴圈中檢查 `p->killed`，如果發現它被設置了，就會放棄目前的行為。 這只有在放棄當前操作是合理的情況下才會這樣做，例如 pipe 的讀寫程式碼（[kernel/pipe.c:84](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/pipe.c#L84)）就會在 `killed` 被設置時直接返回； 之後程式流程會回到 trap，那裡會再一次檢查 `p->killed`，然後執行 `exit`
 
 有些 xv6 中的 `sleep` 迴圈並不會檢查 `p->killed`，因為這些程式碼正處於一個原子性的 multi-step system call 中。 virtio driver 就是一個例子（[kernel/virtio_disk.c:285](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/virtio_disk.c#L285)）：它不會檢查 `p->killed`，因為單個 disk 操作可能是數個寫入中的其中一部分，而這些寫入全部完成後，檔案系統的狀態才會是正確的。 如果一個 process 在等待 disk I/O 的期間被 kill，它仍然會完成目前的系統呼叫，等回到 `usertrap` 時才會檢查 `killed` flag 並結束
+
+## 7.9 Process Locking
+
+每個 process 所對應的 lock（`p->lock`）是 xv6 中最複雜的 lock。 要理解 `p->lock`，一個簡單的方式是：只要要讀取或寫入下列 `struct proc` 欄位時，就必須持有這把 lock：`p->state`、`p->chan`、`p->killed`、`p->xstate`，以及 `p->pid`。 這些欄位可能會被其他 process 或其他 CPU 上的 scheduler 執行緒存取，因此需要用 lock 來保護
+
+然而，`p->lock` 的大多數用途其實是在保護 xv6 中 process 資料結構與演算法的更高層次面向。 以下列出 `p->lock` 所負責的全部事項：
+
+- 與 `p->state` 一起，它可以防止在配置 `proc[]` 中的新 process slot 時發生競爭條件
+  - `proc[]` 是全系統的 process 表，而創建新 process 時需要找一個 `UNUSED` slot。 若沒有鎖，可能兩個 CPU 同時選中一個 slot。 持有 `p->lock` 可讓檢查 `state == UNUSED` 和後續設置變成原子操作
+- 在 process 被建立或銷毀的過程中，它能讓該 process 對外「不可見」
+  - 一個 process 尚未完成初始化，或還沒清除完記憶體前，不應被其他人查詢或操作。 持有 `p->lock` 可避免其他人看到尚未準備好或已經部分銷毀的 process 狀態
+- 它可以防止 parent 的 `wait` 在 child 將狀態設為 `ZOMBIE` 但還沒釋出 CPU 前，就過早回收該 process
+- 它可以防止其他 CPU 的 scheduler 在一個 process 將狀態設成 `RUNNABLE` 但尚未完成 `swtch` 前，就決定要執行它
+  - 從 `RUNNING` 切換出去時狀態會被改為 `RUNNABLE`，但此時還沒完成 context switch。 如果其他 scheduler 此時看到 `RUNNABLE` 而選它，會產生不一致
+- 它能保證只有一個 CPU 的 scheduler 決定要執行某個 `RUNNABLE` 的 process
+  - 防止兩個 scheduler 同時選中同一個 process
+- 它防止 timer interrupt 在 process 正在 `swtch` 時讓它再次 `yield`
+  - 如果在切換 context 的過程中又被中斷，可能會造成 process 被不當地 preempt。 這段說明 `p->lock` 是讓 `swtch` 對 timer interrupt 保持原子性的手段之一
+- 配合條件變數所用的 lock，它可以防止 `wakeup` 漏掉正在呼叫 `sleep` 但還沒完成 `yield` 的 process
+- 它防止在 `kill` 檢查 `p->pid` 與設置 `p->killed` 之間，該目標 process 就已經 exit 並被重複使用
+  - `pid` 是唯一識別 process 的 ID，但 `proc[]` slot 是會被重用的。 如果在 `kill` 檢查 `pid` 後、設置 `killed` 前，該 slot 被別的 process 佔用了，可能會 kill 錯人
+- 它讓 `kill` 對 `p->state` 的讀寫成為一個原子操作
+  - 不只是 `pid`，對 `state` 的操作也要是安全的。 否則 `kill` 可能對一個不該 kill 的狀態進行操作
+
+`p->parent` 欄位則由全域的 `wait_lock` 保護，而不是由 `p->lock` 保護。 只有 process 的 parent 會修改 `p->parent`，但該欄位也會被這個 process 本身以及其他想找它子 process 的 process 所讀取。 `wait_lock` 的用途是當 `wait` 呼叫進入 sleep、等待某個 child 終止時，充當條件用的 lock。 一個正在結束的 child 會持有 `wait_lock` 或 `p->lock`，直到它將自己的狀態設為 `ZOMBIE`，喚醒 parent，並釋出 CPU 為止
+
+`wait_lock` 也會序列化 parent 與 child 同時呼叫 `exit` 的情況，這樣 `init` process（它會繼承該 child）就能保證會從 `wait` 中被喚醒。 `wait_lock` 是一把全域的鎖，而不是每個 parent 都有一把，因為在 process 拿到它之前，它可能還不知道誰是它的 parent
