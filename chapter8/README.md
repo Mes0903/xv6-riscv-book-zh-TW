@@ -246,7 +246,7 @@ struct log log;
 ::: tip  
 這邊先把整個流程簡單紀錄一下，因為當初在看的時候真的看很久，這邊原文寫得不太好，對整個流程先有個認識，看後面的原文才比較看得懂，你也可以先跳過往後看，發現有問題再回來看一下這段
 
-在 xv6 的日誌（log）實作裡，`struct logheader` 是寫入日誌區第一個磁區（header block）的資料結構，也會在記憶體中維持一份相同內容，並隨著交易（transaction）中的 `log_write()` 呼叫而更新。 換句話說，包含等等會看到的 `strcut log` 在內，兩者都只有一個全域的實例（`log` 與 `log.lh`）
+在 xv6 的日誌（log）實作裡，`struct logheader` 是寫入日誌區第一個磁區（header block）的資料結構，也會在記憶體中維持一份相同內容，並隨著 transaction 中的 `log_write()` 呼叫而更新。 換句話說，包含等等會看到的 `strcut log` 在內，兩者都只有一個全域的實例（`log` 與 `log.lh`）
 
 一個 transaction 是一組「要麼全部成功，要麼全部不做」的磁碟操作組合。 這些操作在日誌中被一次性地記錄、提交（commit），保證就算在中途當機也不會只執行了一半、造成檔案系統損毀
 
@@ -529,3 +529,187 @@ balloc(uint dev)
 `bfree`（[kernel/fs.c:92](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L92)）會定位到正確的 bitmap block，然後把相應的位元清 0。 同樣地，`bread` 與 `brelse` 的互斥效果讓程式無需再顯式地加鎖
 
 和本章稍後介紹的大部分程式碼一樣，`balloc` 與 `bfree` 必須包在同一筆 transaction 裡呼叫
+
+## 8.8 Inode layer
+
+「inode」一詞有兩種相關含義：其一指磁碟上的資料結構，內含檔案大小與 data block 的位置清單； 其二指記憶體中的 inode，除了持有該 on-disk inode 的副本，還帶有核心執行時所需的額外資訊
+
+磁碟上的所有 inode 連續存放在一段稱作 inode block 的區域中； 由於每個 inode 大小固定，只要給定編號 `n`，就能直接定位到第 `n` 個 inode。 實作上，這個 `n` 就是 inode number（亦稱 i-number），用來唯一標識一個 inode
+
+on-disk inode 以 `struct dinode`（[kernel/fs.h:32](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.h#L32)）定義：`type` 欄位區分一般檔案、目錄與特殊檔案（裝置），若為 0 代表此 inode 為 free inode； `nlink` 記錄有多少 directory entry 指向此 inode，用來判斷何時可釋放該 inode 及其 data block； `size` 保存檔案內容的位元組數； `addrs` 陣列存放承載檔案內容之磁碟 block 的號碼
+
+```c
+// On-disk inode structure
+struct dinode {
+  short type;           // File type
+  short major;          // Major device number (T_DEVICE only)
+  short minor;          // Minor device number (T_DEVICE only)
+  short nlink;          // Number of links to inode in file system
+  uint size;            // Size of file (bytes)
+  uint addrs[NDIRECT+1];   // Data block addresses
+};
+```
+
+核心將活躍中的 inode 保存在一張 itable 中； `struct inode`（[kernel/file.h:17](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/file.h#L17)）就是記憶體版本的 `struct dinode`。 只有當程式碼持有 C 指標指向該 inode 時，核心才會把它留在記憶體； `ref` 欄位用來計數這些指標，若變為零就會把 inode 從 itable 中移除。 `iget` 與 `iput` 分別負責取得及歸還 inode 指標，並調整 `ref`。 這些指標可能來自檔案描述符、目前的工作目錄或暫時性地核心流程（例如 `exec`）
+
+```c
+// in-memory copy of an inode
+struct inode {
+  uint dev;           // Device number
+  uint inum;          // Inode number
+  int ref;            // Reference count
+  struct sleeplock lock; // protects everything below here
+  int valid;          // inode has been read from disk?
+
+  short type;         // copy of disk inode
+  short major;
+  short minor;
+  short nlink;
+  uint size;
+  uint addrs[NDIRECT+1];
+};
+
+// fs.c:
+struct {
+  struct spinlock lock;
+  struct inode inode[NINODE];
+} itable;
+```
+
+xv6 的 inode 程式碼用了四種鎖或與鎖類似的機制：`itable.lock` 保證「同一個 inode 最多只在 inode table 中出現一次」以及「`ref` 計數正確」這兩項不變式； 每個記憶體 inode 內的 `lock`（sleep-lock）負責確保對 inode 欄位與其檔案／目錄內容區塊的互斥存取； `ref` 只要大於零，系統就會將 inode 維持在表中，且不會把這個槽位給別的 inode 用； 最後，`nlink` 欄位會記錄參考到該檔案的 directory entry 數量，只要大於零，xv6 就不會釋放該 inode
+
+在對應的 `iput()` 呼叫之前，由 `iget()` 取得的 `struct inode` 的指標保證是有效的：該 inode 不會被刪除，且這段記憶體不會指派給別的 inode。 `iget()` 提供非獨占（non-exclusive）存取，因此同一 inode 可被多個指標共用。 檔案系統中有大量程式碼仰賴此語義，這使其既能長期持有 inode（如開啟檔案、目前目錄），又能在處理多個 inode（如路徑解析）時避免競爭與死鎖
+
+```c
+// Find the inode with number inum on device dev
+// and return the in-memory copy. Does not lock
+// the inode and does not read it from disk.
+static struct inode*
+iget(uint dev, uint inum)
+{
+  struct inode *ip, *empty;
+
+  acquire(&itable.lock);
+
+  // Is the inode already in the table?
+  empty = 0;
+  for(ip = &itable.inode[0]; ip < &itable.inode[NINODE]; ip++){
+    if(ip->ref > 0 && ip->dev == dev && ip->inum == inum){
+      ip->ref++;
+      release(&itable.lock);
+      return ip;
+    }
+    if(empty == 0 && ip->ref == 0)    // Remember empty slot.
+      empty = ip;
+  }
+
+  // Recycle an inode entry.
+  if(empty == 0)
+    panic("iget: no inodes");
+
+  ip = empty;
+  ip->dev = dev;
+  ip->inum = inum;
+  ip->ref = 1;
+  ip->valid = 0;
+  release(&itable.lock);
+
+  return ip;
+}
+
+...
+
+// Drop a reference to an in-memory inode.
+// If that was the last reference, the inode table entry can
+// be recycled.
+// If that was the last reference and the inode has no links
+// to it, free the inode (and its content) on disk.
+// All calls to iput() must be inside a transaction in
+// case it has to free the inode.
+void
+iput(struct inode *ip)
+{
+  acquire(&itable.lock);
+
+  if(ip->ref == 1 && ip->valid && ip->nlink == 0){
+    // inode has no links and no other references: truncate and free.
+
+    // ip->ref == 1 means no other process can have ip locked,
+    // so this acquiresleep() won't block (or deadlock).
+    acquiresleep(&ip->lock);
+
+    release(&itable.lock);
+
+    itrunc(ip);
+    ip->type = 0;
+    iupdate(ip);
+    ip->valid = 0;
+
+    releasesleep(&ip->lock);
+
+    acquire(&itable.lock);
+  }
+
+  ip->ref--;
+  release(&itable.lock);
+}
+```
+
+`iget` 回傳的 `struct inode` 可能尚未載入任何有效內容； 為確保其中含有對應的 on-disk inode，程式需呼叫 `ilock`。 `ilock` 會鎖住 inode（防止其他行程再對它做一次 `ilock`）並在尚未讀取時從磁碟載入該 inode，之後可用 `iunlock` 釋放該鎖。 將「取得指標」與「加鎖」分離有助於在某些情況下避免死鎖，例如查找目錄時需同時處理多個 inode。 多個行程可同時持有 `iget` 得到的指標，但同一時間僅允許一個行程鎖住該 inode
+
+```c
+// Lock the given inode.
+// Reads the inode from disk if necessary.
+void
+ilock(struct inode *ip)
+{
+  struct buf *bp;
+  struct dinode *dip;
+
+  if(ip == 0 || ip->ref < 1)
+    panic("ilock");
+
+  acquiresleep(&ip->lock);
+
+  if(ip->valid == 0){
+    bp = bread(ip->dev, IBLOCK(ip->inum, sb));
+    dip = (struct dinode*)bp->data + ip->inum%IPB;
+    ip->type = dip->type;
+    ip->major = dip->major;
+    ip->minor = dip->minor;
+    ip->nlink = dip->nlink;
+    ip->size = dip->size;
+    memmove(ip->addrs, dip->addrs, sizeof(ip->addrs));
+    brelse(bp);
+    ip->valid = 1;
+    if(ip->type == 0)
+      panic("ilock: no type");
+  }
+}
+```
+
+inode table 只保存那些仍被核心程式或資料結構持有 C 指標的 inode，它的首要任務是去協調多行程的存取。 順帶一提，它也剛好會把常用的 inode 快取起來，但這是次要的功能，因為如果某個 inode 經常會被使用到，那 buffer cache 大多也會把對應的磁碟區塊留在記憶體內。 當程式修改記憶體中的 inode 時，會呼叫 `iupdate` 將更動寫回磁碟
+
+```c
+// Copy a modified in-memory inode to disk.
+// Must be called after every change to an ip->xxx field
+// that lives on disk.
+// Caller must hold ip->lock.
+void
+iupdate(struct inode *ip)
+{
+  struct buf *bp;
+  struct dinode *dip;
+
+  bp = bread(ip->dev, IBLOCK(ip->inum, sb));
+  dip = (struct dinode*)bp->data + ip->inum%IPB;
+  dip->type = ip->type;
+  dip->major = ip->major;
+  dip->minor = ip->minor;
+  dip->nlink = ip->nlink;
+  dip->size = ip->size;
+  memmove(dip->addrs, ip->addrs, sizeof(ip->addrs));
+  log_write(bp);
+  brelse(bp);
+}
+```
