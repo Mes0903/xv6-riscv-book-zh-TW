@@ -409,3 +409,74 @@ P(struct semaphore *s)
 ```
 
 `P` 在進入 `sleep` 前就已經持有了 `s->lock`，這使得 `V` 無法在 `P` 檢查 `s->count` 和呼叫 `sleep` 之間插入並嘗試喚醒 `P`。 然而，`sleep` 仍必須以「對 `wakeup` 來說是原子的方式」，同時釋放 `s->lock` 並讓消費者 process 進入睡眠狀態，這樣才能避免 lost wakeup 的問題
+
+## 7.6 Code: Sleep and wakeup
+
+xv6 的 `sleep`（[kernel/proc.c:548](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/proc.c#L548)）與 `wakeup`（[kernel/proc.c:579](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/proc.c#L579)）實作了前面範例中所提到的介面。 基本的做法是：`sleep` 會將目前的 process 標記為 `SLEEPING`，然後呼叫 `sched` 來釋放 CPU； 而 `wakeup` 則會找出正在某個 wait channel 上睡眠的 process，並將其標記為 `RUNNABLE`。 `sleep` 和 `wakeup` 的呼叫者可以任意使用一個雙方同意的數值作為 channel。 xv6 通常會用 kernel 相關的資料結構的位址來當作這個 channel
+
+```c
+// Sleep on wait channel chan, releasing condition lock lk.
+// Re-acquires lk when awakened.
+void
+sleep(void *chan, struct spinlock *lk)
+{
+  struct proc *p = myproc();
+  
+  // Must acquire p->lock in order to
+  // change p->state and then call sched.
+  // Once we hold p->lock, we can be
+  // guaranteed that we won't miss any wakeup
+  // (wakeup locks p->lock),
+  // so it's okay to release lk.
+
+  acquire(&p->lock);  //DOC: sleeplock1
+  release(lk);
+
+  // Go to sleep.
+  p->chan = chan;
+  p->state = SLEEPING;
+
+  sched();
+
+  // Tidy up.
+  p->chan = 0;
+
+  // Reacquire original lock.
+  release(&p->lock);
+  acquire(lk);
+}
+
+// Wake up all processes sleeping on wait channel chan.
+// Caller should hold the condition lock.
+void
+wakeup(void *chan)
+{
+  struct proc *p;
+
+  for(p = proc; p < &proc[NPROC]; p++) {
+    if(p != myproc()){
+      acquire(&p->lock);
+      if(p->state == SLEEPING && p->chan == chan) {
+        p->state = RUNNABLE;
+      }
+      release(&p->lock);
+    }
+  }
+}
+```
+
+`sleep` 會先取得 `p->lock`（[kernel/proc.c:559](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/proc.c#L559)），之後才釋放 `lk`。 `sleep` 之所以會一直持有其中一把鎖，是為了防止同時執行的 `wakeup`（它必須同時取得兩把鎖）在錯誤的時間介入。 此時 `sleep` 已持有 `p->lock`，因此可以透過紀錄 sleep channel、將 process 狀態設為 `SLEEPING`，再呼叫 `sched`（[kernel/proc.c:563-566](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/proc.c#L563-L566)）來讓 process 進入睡眠。 稍後我們會看到，為何一定要等到 process 被標記為 `SLEEPING` 後，`p->lock` 才能被 scheduler 釋放
+
+之後的某個時間點，某個 process 會取得條件鎖、設置條件（也就是喚醒的前提），然後呼叫 `wakeup(chan)`。 這裡的重點是：`wakeup` 呼叫時要持有這把條件鎖（嚴格來說，只要 `wakeup` 緊跟在 `acquire` 之後就夠了，也就是說可以在 `release` 之後呼叫 `wakeup`）。 `wakeup` 會遍歷整張 process table（[kernel/proc.c:579](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/proc.c#L579)），並對每個被檢查的 process 取得其 `p->lock`。 如果 `wakeup` 發現某個 process 處於 `SLEEPING` 狀態，且它的 `chan` 與傳進來的參數相符，就會將其狀態改為 `RUNNABLE`。 接下來當 scheduler 執行時，就會注意到這個 process 已經可以被執行了
+
+`sleep` 和 `wakeup` 的鎖定規則能保證一個 process 在進入睡眠時，不會錯過同時發生的 `wakeup`。 這是因為要進入睡眠的 process，會在檢查條件前就會持有條件鎖與 `p->lock`，或兩者的其中一個，直到被標記為 `SLEEPING` 之後才會釋放它們。 而呼叫 `wakeup` 的 process 在其迴圈中會同時持有這兩把鎖。 因此，喚醒者要嘛會在消費者檢查條件之前就改變條件，要嘛會在消費者已經標為 `SLEEPING` 後再執行 `wakeup`，這樣就能看到睡眠中的 process 並成功喚醒它了（除非有其他事情先喚醒它）
+
+::: tip  
+> 直到被標記為 `SLEEPING` 之後才會釋放它們
+
+這裡是指 `p->lock` 在回到 scheduler context 時會由 `scheduler` 釋放（`release(&p->lock)`）  
+:::
+
+有時會有多個 process 同時在同一個 channel 上睡眠，例如多個 process 同時對一個 pipe 進行讀取，則只需一個 `wakeup` 就會把它們全部喚醒。 當中有一個 process 會先被執行，並成功取得 `sleep` 時用的鎖，在 pipe 的情況下，它會讀走等待中的資料。 其他 process 雖然也被喚醒，卻會發現沒有資料可讀。 從它們的角度來看，這次喚醒是「虛假的（spurious）」，它們必須再次進入睡眠。 也因此，`sleep` 一定會包在一個會檢查條件的迴圈中
+
+即使兩個 sleep/wakeup 使用者不小心選了相同的 channel，也不會造成什麼問題：它們可能會遇到 spurious wakeup 的問題，但只要照上面所說的方式加上迴圈，就可以容忍這種情況。 sleep/wakeup 的設計魅力之一，就在於它既輕量（不需要額外建立用來表示 sleep channel 的特殊資料結構），又提供了一層間接性（呼叫者不需要知道自己在跟哪個特定的 process 互動）
