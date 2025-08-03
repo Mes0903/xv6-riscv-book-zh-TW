@@ -735,3 +735,11 @@ xv6 中對於 `kill` 的支援並不完全令人滿意：有些 sleep loop 應�
 :::
 
 一個真正的作業系統會使用明確的 free list 來在常數時間內找到空的 `proc` 結構，而不是像 xv6 那樣在 `allocproc` 裡用線性搜尋的方式； xv6 採用線性搜尋是為了簡化設計
+
+## 7.11 Exercises
+
+1. 在不使用 `sleep` 與 `wakeup` 的前提下，在 xv6 中實作 `semaphore`（可以使用 spin lock）。 挑選幾個使用 `sleep` 與 `wakeup` 的地方，改用 semaphore 取代。並評估這樣做的結果
+2. 修正前面提到的 `kill` 與 `sleep` 之間的競爭問題，使得當 `kill` 發生在 victim 的 sleep loop 已經檢查過 `p->killed` 但尚未呼叫 `sleep` 之間時，victim 仍能放棄目前的 system call
+3. 設計一個機制，讓所有 sleep loop 都會檢查 `p->killed`。 例如，讓在 virtio driver 中的 process 被其他 process `kill` 時，能夠快速跳出 while loop
+4. 修改 xv6，使從一個 process 的 kernel thread 切換到另一個時，只需要一次 context switch，而不是透過 scheduler thread。 使讓出 CPU 的 thread 自行選出下一個要執行的 thread 並呼叫 `swtch`。 挑戰包括避免多顆 CPU 同時執行同一個 thread、處理鎖的正確性，以及避免 deadlock
+5. 修改 xv6 的 `scheduler`，當沒有任何 process 可執行時，使用 RISC-V 的 `WFI`（wait for interrupt）指令。 嘗試確保只要還有 process 處於 runnable 狀態，就不會有 CPU 還在執行 `WFI`
