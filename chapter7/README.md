@@ -705,3 +705,33 @@ wait(uint64 addr)
 `p->parent` 欄位則由全域的 `wait_lock` 保護，而不是由 `p->lock` 保護。 只有 process 的 parent 會修改 `p->parent`，但該欄位也會被這個 process 本身以及其他想找它子 process 的 process 所讀取。 `wait_lock` 的用途是當 `wait` 呼叫進入 sleep、等待某個 child 終止時，充當條件用的 lock。 一個正在結束的 child 會持有 `wait_lock` 或 `p->lock`，直到它將自己的狀態設為 `ZOMBIE`，喚醒 parent，並釋出 CPU 為止
 
 `wait_lock` 也會序列化 parent 與 child 同時呼叫 `exit` 的情況，這樣 `init` process（它會繼承該 child）就能保證會從 `wait` 中被喚醒。 `wait_lock` 是一把全域的鎖，而不是每個 parent 都有一把，因為在 process 拿到它之前，它可能還不知道誰是它的 parent
+
+## 7.10 Real world
+
+xv6 的 scheduler 採用一種簡單的排程策略：輪流執行每個 process，這種策略被稱為輪轉（round robin）。 而實際的作業系統會實作更複雜的策略，例如允許 process 擁有優先權。 這樣一來，scheduler 會傾向選擇可執行的高優先權 process，而不是低優先權的 process。 不過，這類策略通常很快就會變得複雜，因為作業系統往往同時還想達成其他目標，例如公平性與高吞吐量
+
+此外，複雜的排程策略還可能導致一些非預期的互動問題，例如優先權反轉（priority inversion）與護航效應（convoys）。 優先權反轉會發生在高優先權與低優先權的 process 同時使用某個 lock，而這個 lock 被低優先權的 process 持有時，就會阻止高優先權的 process 前進。 若有很多高優先權的 process 在等待同一個低優先權的 process 釋出共享的 lock，就可能形成長串的等待隊列（convoy）； 一旦這樣的 convoy 形成，可能會持續很長一段時間，導致效能下降。 為了避免這些問題，更精密的 scheduler 必須加入額外機制
+
+`sleep` 與 `wakeup` 是一種簡單而有效的同步方法，但還有很多其他同步方式。 這些方法的首要挑戰是避免本章開頭所提到的「lost wakeups」問題。 早期的 Unix kernel 的 `sleep` 做法是直接關閉中斷，這在當時單核心的系統上是足夠的。 但因為 xv6 是多核心系統，它對 `sleep` 加入了額外的 lock
+
+FreeBSD 的 `msleep` 採取了相同的做法。 Plan 9 的 `sleep` 則是使用一個 callback function，在進入 sleep 前、持有 scheduler 的 lock 時執行該函數，以作為最後一次檢查 sleep 條件，來避免 lost wakeup。 Linux kernel 的 `sleep` 使用一個明確的 process queue，稱為 wait queue，來取代 wait channel； 這個 queue 自身有其內部的 lock
+
+在 `wakeup` 中掃描整個 process 集合是一種低效率的做法。 更好的做法是把 `sleep` 和 `wakeup` 中的 `chan` 換成一種資料結構，這個資料結構能保存所有在該條件上等待的 process，例如 Linux 使用的 wait queue。 Plan 9 的 `sleep` 與 `wakeup` 將這個結構稱為 rendezvous point。 許多 thread library 把同樣的東西稱為 condition variable； 在這種情況下，`sleep` 與 `wakeup` 的操作分別被稱為 `wait` 與 `signal`。 所有這些機制的核心原則是一樣的：sleep 的條件會受到某種 lock 保護，並且這個 lock 會在 sleep 的同時被原子性地釋放
+
+`wakeup` 的實作會喚醒所有在特定 channel 上等待的 process，而在某些情況下，可能有很多 process 都在等同一個 channel。 作業系統會將這些 process 全部排入排程隊列，然後它們會競爭去檢查 sleep 條件。 這種情況下的 process 行為有時被稱為「雷群效應（thundering herd）」，應該盡量避免這種情況發生。 大多數的 condition variable 提供兩個 `wakeup` 相關的操作：`signal`（喚醒一個 process）以及 `broadcast`（喚醒所有等待中的 process）
+
+semaphore 也經常被用來做同步。它的計數器通常代表像是 pipe buffer 中可用的 byte 數，或是某個 process 擁有的 zombie child 數量。 semaphore 將這個計數值納入抽象的一部分，可以避免「lost wakeup」的問題：因為 wakeup 的次數是有明確計數的。 此外，這個計數也能避免虛假喚醒（spurious wakeup）與雷群效應（thundering herd）的問題
+
+在 xv6 中終止 process 並清理其資源會引入相當多的複雜性。 在大多數作業系統中，這件事甚至更加複雜，因為被終止的 process 可能在 kernel 裡處於深層的 sleep 狀態，而要將它的 call stack 卸除時必須非常小心，因為 call stack 上的每個函數可能都需要做一些清理工作。 有些程式語言提供例外處理機制來協助這類清理，但 C 語言沒有
+
+此外，還有其他事件可能會導致一個正在 sleep 的 process 被喚醒，即使它等待的事件尚未發生。 例如，在 Unix 中，如果一個 process 處於 sleep 狀態，其他 process 可以向它送出 `signal`。 在這種情況下，該 process 會從被中斷的 system call 返回，並回傳 -1，同時將錯誤碼設為 `EINTR`。 應用程式可以根據這些值來決定後續處理方式。 而 xv6 不支援 signal，因此不會遇到這類複雜性
+
+xv6 中對於 `kill` 的支援並不完全令人滿意：有些 sleep loop 應該要檢查 `p->killed` 卻沒有檢查。 另一個相關的問題是，即便某些 sleep loop 會檢查 `p->killed`，仍然會遇到 `sleep` 與 `kill` 之間的競爭條件：`kill` 可能會在 victim 的 loop 檢查完 `p->killed`，但尚未呼叫 `sleep` 之前設下 `p->killed` 並試圖喚醒 victim。 如果發生這種情況，victim 將無法察覺 `p->killed`，直到它所等待的條件真的發生。 這可能會是很久以後，甚至永遠不會發生（例如如果 victim 在等待來自 console 的輸入，而使用者沒有打字）
+
+::: tip  
+`kill` 會設定 `p->killed` 並叫醒 process，但如果 process 剛好檢查過 `p->killed` 但還沒真的去 sleep，那麼它會 miss 掉這個訊號。 結果就是 process 還是 sleep 了，等不到喚醒，直到條件真的成立才醒來，這可能永遠不會發生（如等待輸入）
+
+這是一個經典的 race，解法通常是將檢查條件與睡眠動作做成「原子操作」。 在 xv6 中 `sleep` 實作是：呼叫者先持有某個 lock，然後 `sleep` 把它加入 `chan` 的等待隊列後釋放 lock 並切換 context，但這中間還是會有空窗期  
+:::
+
+一個真正的作業系統會使用明確的 free list 來在常數時間內找到空的 `proc` 結構，而不是像 xv6 那樣在 `allocproc` 裡用線性搜尋的方式； xv6 採用線性搜尋是為了簡化設計
