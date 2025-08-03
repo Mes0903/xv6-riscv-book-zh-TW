@@ -295,3 +295,117 @@ xv6 經常需要取得目前正在執行的 process 所對應的 `proc` 結構�
 `cpuid` 和 `mycpu` 的回傳值比較脆弱（fragile），如果在這之後發生 timer 中斷，導致目前這條 thread 放棄 CPU，然後稍後被排到另一顆 CPU 上執行，那麼原先回傳的值就會失效。 為了避免這個問題，xv6 要求呼叫這些函式的程式碼在使用期間必須先關閉中斷，等到使用完畢後再重新開啟
 
 函式 `myproc`（[kernel/proc.c:83](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/proc.c#L83)）會回傳目前正在當前 CPU 上執行的 process 的 `struct proc` 指標。 `myproc` 在執行過程中會先關閉中斷，接著呼叫 `mycpu`，從 `struct cpu` 中取得目前的 `c->proc`，最後再重新開啟中斷。 `myproc` 的回傳值在中斷開啟的情況下也可以安全使用：即使 timer 中斷將目前的 process 移動到另一顆 CPU，指向這個 process 的 `struct proc` 指標仍然是同一個
+
+## 7.5 Sleep and wakeup
+
+排程與鎖有助於把一個執行緒的行為對其他執行緒隱藏起來，但我們也需要一些抽象工具來讓執行緒之間可以有意識地互動。 舉例來說，xv6 中 pipe 的讀取端可能需要等待寫入端產生資料； 父 process 呼叫 `wait` 時可能要等子 process 結束； 而一個讀硬碟的 process 則需要等待硬碟裝置完成資料讀取
+
+xv6 kernel 在這些（以及其他許多）情境中會使用名為 sleep 與 wakeup 的機制。 sleep 讓 kernel 執行緒可以等待特定事件； 而另一個執行緒則可以呼叫 wakeup 來通知等待某個事件的執行緒可以繼續執行了。 sleep 和 wakeup 常被稱為「順序協調（sequence coordination）」或「條件同步（conditional synchronization）」機制
+
+sleep 和 wakeup 提供的是一種相對底層的同步介面。 為了說明它們在 xv6 中的運作方式，我們將使用它們來構建一個較高層級的同步機制，稱為 semaphore（但 xv6 並未實際使用 semaphore）。 一個 semaphore 會維護一個計數器，並提供兩種操作：V 操作（由生產者使用）會將計數器加一； P 操作（由消費者使用）會等計數器變為非零值，然後將其減一並返回。 假設只有一個生產者執行緒與一個消費者執行緒，其分別在不同的 CPU 上執行，並且編譯器沒有做過度最佳化，那麼以下的實作將是正確的：
+
+```c
+struct semaphore {
+  struct spinlock lock;
+  int count;
+};
+
+void 
+V(struct semaphore *s)
+{
+  acquire(&s->lock);
+  s->count += 1;
+  release(&s->lock);
+}
+
+void
+P(struct semaphore *s)
+{
+  while(s->count == 0)
+    ;
+  acquire(&s->lock);
+  s->count -= 1;
+  release(&s->lock);
+}
+```
+
+但上述的實作非常低效。 若生產者很少會被執行，消費者就會把大部分的時間花在 while 迴圈中自旋，等待 `count` 變成非零值。 消費者所佔用的 CPU 應該可以用來做更有生產力的事，而不是透過不斷輪詢 `s->count` 來忙等。 若要避免這種忙等，我們就需要讓消費者能夠讓出 CPU，等到 `V` 把 count 加一後才再回來繼續執行
+
+儘管這樣還不夠完善，但這正是往前的第一步。 設想有一對名為 `sleep` 和 `wakeup` 的函式，其行為如下：`sleep(chan)` 會等待一個由 `chan` 的值所指定的事件，這個值被稱為「等待通道（wait channel）」。 `sleep` 會讓呼叫它的 process 進入睡眠狀態，並釋放 CPU 讓其他工作可以執行。 `wakeup(chan)` 則會喚醒所有正在對相同 `chan` 呼叫 `sleep` 的 process（如果有的話），讓那些 `sleep` 函式返回。 如果沒有 process 正在等待該 `chan`，則 `wakeup` 不會有任何效果
+
+現在我們可以利用 `sleep` 與 `wakeup` 來修改 semaphore 的實作：
+
+```c
+void
+V(struct semaphore *s)
+{
+   acquire(&s->lock);
+   s->count += 1;
+   wakeup(s);  // added line
+   release(&s->lock);
+}
+
+void
+P(struct semaphore *s)
+{
+  while(s->count == 0)
+    sleep(s);   // added line
+  acquire(&s->lock);
+  s->count -= 1;
+  release(&s->lock);
+}
+```
+
+現在 `P` 不再自旋了，其會讓出 CPU，這是個好改進。 不過要用這種介面正確實作 sleep 和 wakeup 並不容易，因為我們會遇到一種稱為「喚醒遺失（lost wake-up）」的問題。 假設 `P` 在 `while(s->count == 0)` 處發現 `s->count == 0`，但就在 `P` 執行完第 13 行，準備執行第 14 行時，`V` 在另一個 CPU 上被執行了，此時 `V` 將 `s->count` 改為了非零值，並呼叫了 `wakeup`，但此時尚未有任何 process 在睡眠中，因此 `wakeup` 就沒有做任何事
+
+接著 `P` 繼續執行到第 14 行，呼叫了 `sleep` 並進入了睡眠狀態。 這就造成了一個問題：`P` 此時正在等待一個已經由 `V` 發完的 `wakeup` 呼叫。 除非我們運氣很好，生產者再次呼叫了 `V`，否則消費者將會被永遠卡住，即使 `count` 已經是非零值了
+
+這個問題的根源在於，一個重要的不變式被破壞了：`P` 只會在 `s->count == 0` 的時候才去 `sleep`。 但這個不變式在 `V` 剛好於錯誤時機執行時會被破壞。 有一種錯誤的解法，是試圖透過把 `P` 裡面取得 lock 的動作往前移，讓 `count` 的檢查與呼叫 `sleep` 的過程變成原子操作：
+
+```c
+void
+V(struct semaphore *s)
+{
+  acquire(&s->lock);
+  s->count += 1;
+  wakeup(s);
+  release(&s->lock);
+}
+
+void
+P(struct semaphore *s)
+{
+  acquire(&s->lock);        // <--- 錯誤方式
+  while(s->count == 0)
+    sleep(s);
+  s->count -= 1;
+  release(&s->lock);
+}
+```
+
+我們希望這個版本的 `P` 能避免 lost wakeup，因為 lock 阻止了 `V` 在 `while(s->count == 0)` 與 `sleep(s)` 之間插入執行。 它確實做到了這點，但也同時導致了死鎖：`P` 在進入 `sleep` 時仍持有 lock，導致 `V` 永遠無法取得 lock 而被卡住
+
+我們將透過改變 `sleep` 的介面來修正先前的設計問題：呼叫者必須將「條件鎖（condition lock）」傳遞給 `sleep`，讓 `sleep` 可以在呼叫者被標記為睡眠，並在指定的 sleep channel 等待後釋放該鎖。 這把鎖會強制讓同時執行的 `V` 延後執行，直到 `P` 完成進入睡眠，這樣 `wakeup` 才能正確找到處於睡眠狀態的消費者並喚醒它。 一旦消費者再次被喚醒，`sleep` 會在返回前重新取得這把鎖。 經過這種修正後的 sleep/wakeup 機制可以如下列方式使用：
+
+```c
+void
+V(struct semaphore *s)
+{
+  acquire(&s->lock);
+  s->count += 1;
+  wakeup(s);
+  release(&s->lock);
+}
+
+void
+P(struct semaphore *s)
+{
+  acquire(&s->lock);
+  while(s->count == 0)
+     sleep(s, &s->lock);  // <--- 改版後的 sleep 會接受一個 lock 引數
+  s->count -= 1;
+  release(&s->lock);
+}
+```
+
+`P` 在進入 `sleep` 前就已經持有了 `s->lock`，這使得 `V` 無法在 `P` 檢查 `s->count` 和呼叫 `sleep` 之間插入並嘗試喚醒 `P`。 然而，`sleep` 仍必須以「對 `wakeup` 來說是原子的方式」，同時釋放 `s->lock` 並讓消費者 process 進入睡眠狀態，這樣才能避免 lost wakeup 的問題
