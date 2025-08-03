@@ -469,7 +469,7 @@ wakeup(void *chan)
 
 之後的某個時間點，某個 process 會取得條件鎖、設置條件（也就是喚醒的前提），然後呼叫 `wakeup(chan)`。 這裡的重點是：`wakeup` 呼叫時要持有這把條件鎖（嚴格來說，只要 `wakeup` 緊跟在 `acquire` 之後就夠了，也就是說可以在 `release` 之後呼叫 `wakeup`）。 `wakeup` 會遍歷整張 process table（[kernel/proc.c:579](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/proc.c#L579)），並對每個被檢查的 process 取得其 `p->lock`。 如果 `wakeup` 發現某個 process 處於 `SLEEPING` 狀態，且它的 `chan` 與傳進來的參數相符，就會將其狀態改為 `RUNNABLE`。 接下來當 scheduler 執行時，就會注意到這個 process 已經可以被執行了
 
-`sleep` 和 `wakeup` 的鎖定規則能保證一個 process 在進入睡眠時，不會錯過同時發生的 `wakeup`。 這是因為要進入睡眠的 process，會在檢查條件前就會持有條件鎖與 `p->lock`，或兩者的其中一個，直到被標記為 `SLEEPING` 之後才會釋放它們。 而呼叫 `wakeup` 的 process 在其迴圈中會同時持有這兩把鎖。 因此，喚醒者要嘛會在消費者檢查條件之前就改變條件，要嘛會在消費者已經標為 `SLEEPING` 後再執行 `wakeup`，這樣就能看到睡眠中的 process 並成功喚醒它了（除非有其他事情先喚醒它）
+`sleep` 和 `wakeup` 的鎖定規則能保證一個 process 在進入睡眠時，不會錯過同時發生的 `wakeup`。 這是因為要進入睡眠的 process，會在檢查條件前就會持有條件鎖與 `p->lock`，或兩者的其中一個，直到被標記為 `SLEEPING` 之後才會釋放它們。 而呼叫 `wakeup` 的 process 在其迴圈中會同時持有這兩把鎖。 因此，喚醒者要麼會在消費者檢查條件之前就改變條件，要麼會在消費者已經標為 `SLEEPING` 後再執行 `wakeup`，這樣就能看到睡眠中的 process 並成功喚醒它了（除非有其他事情先喚醒它）
 
 ::: tip  
 > 直到被標記為 `SLEEPING` 之後才會釋放它們
