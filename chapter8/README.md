@@ -40,9 +40,9 @@ inode 層提供單一檔案的表示方式，每個檔案由一個 inode 表示�
 
 ## 8.2 Buffer cache layer
 
-buffer cache 有兩個主要任務：第一是同步對磁碟區塊的存取，確保記憶體中對每個區塊只有一個拷貝，並且同一時間只有一個 kernel 執行緒會使用該拷貝； 第二是對常用的區塊進行快取，避免每次都要從緩慢的硬碟中重新讀取。 相關程式碼實作位於 `bio.c`
+buffer cache 有兩個主要任務：第一是同步對磁碟區塊的存取，確保記憶體中對每個區塊只有一個副本，並且同一時間只有一個 kernel 執行緒會使用該副本； 第二是對常用的區塊進行快取，避免每次都要從緩慢的硬碟中重新讀取。 相關程式碼實作位於 `bio.c`
 
-buffer cache 對外提供的主要介面包括 `bread` 與 `bwrite`； 前者會取得一個「buf」，也就是某個磁碟區塊在記憶體中的拷貝，這份資料可以被讀取或修改，而後者則會將修改過的 buffer 寫回對應的磁碟區塊。 當 kernel 執行緒使用完這個 buffer 後，必須呼叫 `brelse` 來釋放該 buffer。 buffer cache 為每個 buffer 使用一個 sleep-lock，以確保同一時間只有一個執行緒能使用某個 buffer（也就是某個磁碟區塊）； `bread` 會回傳一個已上鎖的 buffer，而 `brelse` 則會釋放該鎖
+buffer cache 對外提供的主要介面包括 `bread` 與 `bwrite`； 前者會取得一個「buf」，也就是某個磁碟區塊在記憶體中的副本，這份資料可以被讀取或修改，而後者則會將修改過的 buffer 寫回對應的磁碟區塊。 當 kernel 執行緒使用完這個 buffer 後，必須呼叫 `brelse` 來釋放該 buffer。 buffer cache 為每個 buffer 使用一個 sleep-lock，以確保同一時間只有一個執行緒能使用某個 buffer（也就是某個磁碟區塊）； `bread` 會回傳一個已上鎖的 buffer，而 `brelse` 則會釋放該鎖
 
 buffer cache 只有固定數量的 buffer 可用來儲存磁碟區塊，這表示如果檔案系統要求某個目前不在 cache 中的區塊，buffer cache 就必須回收一個目前用來儲存其他區塊的 buffer。 它會選擇最近最少使用（Least Recently Used, LRU）的那個 buffer 來回收並用於新的區塊。 這基於一個假設：最近最少使用的 buffer 很可能短期內也不會再被使用
 
@@ -71,7 +71,7 @@ binit(void)
 }
 ```
 
-每個 buffer 都有兩個與其狀態有關的欄位。 `valid` 欄位表示這個 buffer 中目前包含了某個磁碟區塊的拷貝。 `disk` 欄位則表示該 buffer 的內容已經交由磁碟處理，也就是可能已經被磁碟寫入了（例如從磁碟讀資料到 `data` 陣列中）
+每個 buffer 都有兩個與其狀態有關的欄位。 `valid` 欄位表示這個 buffer 中目前包含了某個磁碟區塊的副本。 `disk` 欄位則表示該 buffer 的內容已經交由磁碟處理，也就是可能已經被磁碟寫入了（例如從磁碟讀資料到 `data` 陣列中）
 
 ```c
 struct buf {
@@ -197,3 +197,22 @@ xv6 使用一種簡化的 logging 機制來解決檔案系統操作期間可能�
 如果系統發生當機並重新啟動，檔案系統的程式會在執行任何 process 之前先進行以下的復原程序。 若 log 被標記為包含一筆完整的操作，那麼復原程式就會將這筆操作所對應的寫入內容複製到對應的檔案系統資料結構中。 反之，如果 log 沒有被標記為包含完整操作，復原程式就會忽略這份 log。 最後，復原程式會將 log 從磁碟上清除
 
 xv6 的 log 能解決檔案系統操作期間發生當機的問題的原因是，如果當機發生在操作完成 commit 之前，那麼磁碟上的 log 不會被標記為完成，復原程式就會忽略它，此時硬碟的狀態就像這筆操作根本沒開始過一樣。 如果當機發生在操作 commit 之後，那麼復原程式會重播這筆操作的所有寫入，儘管在當機之前這些寫入可能已經部分套用到其資料結構中了。 無論是哪種情況，這個 log 都讓檔案系統的操作在面對當機時具有原子性：在復原之後，要嘛這筆操作的所有寫入都存在磁碟上，要嘛一個寫入都沒有
+
+## 8.5 Log design
+
+log 儲存在一個已知的固定位置，這個位置由 superblock 指定。 log 的內容包含一個 header 區塊，後面接著一連串更新後的區塊副本（稱為「logged blocks」）。 header 區塊中會有一個 sector 編號的陣列，對應每個 logged block 各自的磁區編號，還會有一個 log block 數量的計數值
+
+若磁碟上的 header 區塊中的 count 欄位為 0，表示目前 log 中沒有任何 transaction； 若為非零，則表示 log 中已包含一筆完整且已 commit 的 transaction，且其中有指定數量的 logged blocks。 xv6 會在 commit 時寫入這個 header 區塊（而不是事前），並在把 logged blocks 寫入檔案系統後，將 count 清 0。 因此，如果 transaction 執行到一半當機，log 的 header block 中的 count 就會是 0； 如果在 commit 之後才當機，那麼 count 會是非零
+
+每個系統呼叫的程式碼都會標示出寫入序列的起點與終點，在這之間的寫入對 crash 來說必須是原子的。 在讓多個 process 同時執行檔案系統操作的情況下，log 系統允許將多個系統呼叫的寫入操作累積在同一個 transaction 中。 因此，單個 commit 可能包含了多個完整系統呼叫的寫入。 為了避免某個系統呼叫的寫入被拆分到不同的 transaction 中，log 系統只有在沒有任何檔案系統相關的系統呼叫在執行時才會進行 commit
+
+將多筆 transaction 一起進行 commit 的概念被稱為「group commit」。 group commit 能減少磁碟操作的次數，因為它可以將 commit 的固定成本分攤到多筆操作上。 此外，group commit 也會讓磁碟系統一次接收到較多筆寫入操作，有機會讓磁碟在一次旋轉期間就完成所有寫入。 雖然 xv6 所用的 virtio driver 並不支援這種 batching，但 xv6 的檔案系統設計仍然允許這種做法的存在
+
+xv6 在磁碟上預留了一塊固定大小的空間用來存放 log。 每次 transaction 中由系統呼叫寫入的所有區塊數量必須能夠塞進這塊 log 空間。 這會產生兩個後果：
+
+- 第一：不能讓任何一個系統呼叫寫入超過 log 空間大小的區塊數
+  - 這對大多數系統呼叫來說不是問題，但有兩個系統呼叫可能會寫入大量區塊：`write` 與 `unlink`
+    - 對於一個大型檔案的 `write` 操作，可能需要寫入很多個 data block、bitmap block，甚至還包含一個 inode block
+    - `unlink` 一個大型檔案也可能會涉及多個 bitmap block 與 inode 的寫入
+  - xv6 的 `write` 系統呼叫會將大型寫入拆分成多個較小的操作，每次都能夠塞進 log； 而 `unlink` 則沒造成實務上的問題，因為 xv6 的 file system 通常只會用到一個 bitmap block
+- 第二：由於 log 空間有限，在 logging system 確認一個系統呼叫的所有寫入能夠完全塞入剩餘的 log 空間之前，不能允許該系統呼叫開始執行
