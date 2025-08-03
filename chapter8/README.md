@@ -484,3 +484,48 @@ end_op();
 ```
 
 這段程式碼被包在一個迴圈中，會將大型的寫入操作分成多個僅寫入少數磁區的小型 transaction，以避免 log 空間爆滿。 `writei` 呼叫的過程中會寫入許多不同的 block，包括該檔案的 inode、一個或多個 bitmap block，以及一些 data block
+
+## 8.7 Code: Block allocator
+
+檔案與目錄的內容都放在硬碟的 block 裡，而這些 block 必須從可用的空閒池中分配。 xv6 的區塊配置器在硬碟上維護一張「free bitmap」，一個 block 會對應到其中的一個位元。 位元為 0 表示該 block 為 free block； 為 1 表示已被使用。 建立檔案系統的程式 `mkfs` 會先把開機區、superblock、log 區塊、inode 區塊以及 bitmap block 對應的位元設為 1
+
+區塊配置器提供兩個函式：`balloc` 用來分配新的硬碟區塊，`bfree` 用來釋放硬碟區塊。 `balloc` 裡的迴圈（[kernel/fs.c:72](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L72)）會一路從 block 0 檢查到 `sb.size`（檔案系統的總 block 數），以尋找 bitmap 為 0 的 block（也就是目前空閒的 block）。 一旦找到，就把對應的 bitmap 設成 1，並回傳該 block
+
+為了效率，整個掃描拆成兩層：外層一次讀取一個「bitmap block」，內層檢查這個 bitmap block 裡的 `BPB` 個位元。 若兩個行程同時嘗試分配 block，理論上會產生競爭，但實際上 buffer cache 會保證同一個 bitmap block 在同一時間只會被一個行程持有，因此避免了這種競爭
+
+::: tip  
+`sb.size` 來自 superblock，代表檔案系統容量。 因為 bitmap 本身也存放在硬碟上，掃描時必須先把 bitmap 的內容讀進快取（buffer cache）。 而 `BPB = (block size in bytes) × 8`，意思是一個 bitmap block 可以表示多少 data block，在 xv6 的實作中 `BPB = 1024 * 8`。 把掃描拆兩層可以減少 I/O 次數：一次讀進來就檢查整個 bitmap block，而不是每找一個位元就讀一次硬碟  
+:::
+
+```c
+// Allocate a zeroed disk block.
+// returns 0 if out of disk space.
+static uint
+balloc(uint dev)
+{
+  int b, bi, m;
+  struct buf *bp;
+
+  bp = 0;
+  for(b = 0; b < sb.size; b += BPB){
+    bp = bread(dev, BBLOCK(b, sb));
+    for(bi = 0; bi < BPB && b + bi < sb.size; bi++){
+      m = 1 << (bi % 8);
+      if((bp->data[bi/8] & m) == 0){  // Is block free?
+        bp->data[bi/8] |= m;  // Mark block in use.
+        log_write(bp);
+        brelse(bp);
+        bzero(dev, b + bi);
+        return b + bi;
+      }
+    }
+    brelse(bp);
+  }
+  printf("balloc: out of blocks\n");
+  return 0;
+}
+```
+
+`bfree`（[kernel/fs.c:92](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L92)）會定位到正確的 bitmap block，然後把相應的位元清 0。 同樣地，`bread` 與 `brelse` 的互斥效果讓程式無需再顯式地加鎖
+
+和本章稍後介紹的大部分程式碼一樣，`balloc` 與 `bfree` 必須包在同一筆 transaction 裡呼叫
