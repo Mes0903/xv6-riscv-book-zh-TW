@@ -554,3 +554,127 @@ piperead(struct pipe *pi, uint64 addr, int n)
 此時 `piperead` 取得了 pipe 的 lock 並進入 critical section：它發現 `pi->nread != pi->nwrite`（[kernel/pipe.c:113](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/pipe.c#L113)）（這代表之前 `pipewrite` 是因為 `pi->nwrite == pi->nread + PIPESIZE` 而進入 `sleep` 的，見 [kernel/pipe.c:88](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/pipe.c#L88)），所以接著進入 for 迴圈，從 pipe 中複製資料出去（[kernel/pipe.c:120](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/pipe.c#L120)），並根據複製的 byte 數增加 `nread`。 此時這些空出來的 byte 就又可供寫入了，因此 `piperead` 會呼叫 `wakeup`（[kernel/pipe.c:127](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/pipe.c#L127)）喚醒可能在等待的 writer。 wakeup 會找到那個在 `&pi->nwrite` 上睡眠的 process，也就是之前因為 buffer 滿了而進入 sleep 的 `pipewrite` process，並將該 process 標記為 `RUNNABLE`
 
 pipe 的程式碼為 reader 和 writer 使用了不同的 sleep channel（分別為 `pi->nread` 與 `pi->nwrite`）； 這麼做可能會讓系統在有大量 reader 和 writer 同時等待同一條 pipe 的情況下更有效率。 pipe 的 sleep 都寫在一個會檢查條件的迴圈中； 如果有多個 reader 或 writer，其中第一個醒來的 process 會發現條件滿足，而其他人會因為條件還不成立再次進入 sleep
+
+## 7.8 Code: Wait, exit, and kill
+
+`sleep` 和 `wakeup` 可以用在許多種類的等待情境中。 一個有趣的例子是在第一章中介紹的：child 的 `exit` 和 parent 的 `wait` 之間的互動。 在 child 終止時，parent 可能已經因 `wait` 而處於睡眠中，或是正在執行其他事情； 如果是後者，即使已經距離 `exit` 呼叫過了一段時間，之後呼叫 `wait` 時也必須能夠觀察到 child 的死亡
+
+xv6 採用的做法是讓 `exit` 將呼叫者的狀態設為 `ZOMBIE`，child 會保持在該狀態，直到 parent 呼叫 `wait` 並察覺到它，接著將 child 的狀態改成 `UNUSED`，複製其退出狀態，並將其 process ID 回傳給 parent。 如果 parent 在 child 之前先結束了，那麼 parent 會把 child 移交給 `init` process，其會永久地呼叫 `wait`； 因此每個 child 都會有一個負責清理它的 parent。 實作上的挑戰在於如何避免 parent 和 child 同時呼叫 `wait` 或 `exit`，或兩個 process 同時呼叫 `exit` 時產生 race condition 或 deadlock
+
+```c
+// Exit the current process.  Does not return.
+// An exited process remains in the zombie state
+// until its parent calls wait().
+void
+exit(int status)
+{
+  struct proc *p = myproc();
+
+  if(p == initproc)
+    panic("init exiting");
+
+  // Close all open files.
+  for(int fd = 0; fd < NOFILE; fd++){
+    if(p->ofile[fd]){
+      struct file *f = p->ofile[fd];
+      fileclose(f);
+      p->ofile[fd] = 0;
+    }
+  }
+
+  begin_op();
+  iput(p->cwd);
+  end_op();
+  p->cwd = 0;
+
+  acquire(&wait_lock);
+
+  // Give any children to init.
+  reparent(p);
+
+  // Parent might be sleeping in wait().
+  wakeup(p->parent);
+  
+  acquire(&p->lock);
+
+  p->xstate = status;
+  p->state = ZOMBIE;
+
+  release(&wait_lock);
+
+  // Jump into the scheduler, never to return.
+  sched();
+  panic("zombie exit");
+}
+```
+
+`wait` 會先取得 `wait_lock`（[kernel/proc.c:391](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/proc.c#L391)），這把鎖扮演著條件鎖的角色，用來確保 `wait` 不會錯過 child `exit` 所發出的 `wakeup`。 接著 `wait` 會掃描整張 process table，如果找到一個狀態為 `ZOMBIE` 的 child，它會釋放該 child 的資源和其 `proc` 結構，並將其 exit status 複製到 `wait` 所提供的指標中（如果該指標不是 0），然後回傳該 child 的 process ID
+
+如果 `wait` 找到一些 child，但都還沒 `exit`，它就會呼叫 `sleep` 來等待其中任何一個結束（[kernel/proc.c:433](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/proc.c#L433)），然後再次掃描。 `wait` 經常同時持有兩把鎖：`wait_lock` 和某個 child 的 `pp->lock`。 為了避免 deadlock，持鎖的順序必須是先取 `wait_lock` 再取 `pp->lock`
+
+```c
+// Wait for a child process to exit and return its pid.
+// Return -1 if this process has no children.
+int
+wait(uint64 addr)
+{
+  struct proc *pp;
+  int havekids, pid;
+  struct proc *p = myproc();
+
+  acquire(&wait_lock);
+
+  for(;;){
+    // Scan through table looking for exited children.
+    havekids = 0;
+    for(pp = proc; pp < &proc[NPROC]; pp++){
+      if(pp->parent == p){
+        // make sure the child isn't still in exit() or swtch().
+        acquire(&pp->lock);
+
+        havekids = 1;
+        if(pp->state == ZOMBIE){
+          // Found one.
+          pid = pp->pid;
+          if(addr != 0 && copyout(p->pagetable, addr, (char *)&pp->xstate,
+                                  sizeof(pp->xstate)) < 0) {
+            release(&pp->lock);
+            release(&wait_lock);
+            return -1;
+          }
+          freeproc(pp);
+          release(&pp->lock);
+          release(&wait_lock);
+          return pid;
+        }
+        release(&pp->lock);
+      }
+    }
+
+    // No point waiting if we don't have any children.
+    if(!havekids || killed(p)){
+      release(&wait_lock);
+      return -1;
+    }
+    
+    // Wait for a child to exit.
+    sleep(p, &wait_lock);  //DOC: wait-sleep
+  }
+}
+```
+
+`exit`（[kernel/proc.c:347](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/proc.c#L347)）會記錄退出狀態、釋放部分資源、呼叫 `reparent` 將自己的 child 移交給 `init` process、喚醒可能正在 `wait` 的 parent、將自己標記為 zombie，並永久讓出 CPU。 `exit` 在這段過程中會同時持有 `wait_lock` 和 `p->lock`。 持有 `wait_lock` 是為了確保喚醒 parent（`wakeup(p->parent)`）時不會遺失 wakeup（因為這是條件鎖）。 它也必須持有 `p->lock`，以避免在 child 尚未完成 `swtch` 之前，parent 在 `wait` 中看到 child 處於 `ZOMBIE` 狀態。 `exit` 持鎖的順序與 `wait` 相同，以避免 deadlock
+
+`exit` 在將自己的狀態設為 `ZOMBIE` 之前就喚醒 parent，看起來好像不太正確，但這其實是安全的：雖然 `wakeup` 可能會讓 parent 被排程執行，但 `wait` 中的迴圈在 child 的 `p->lock` 被 scheduler 釋放之前，無法存取該 child，因此 `wait` 不會太早看到該 process，直到 `exit` 把狀態設為 `ZOMBIE` 為止（[kernel/proc.c:379](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/proc.c#L379)）
+
+`exit` 允許一個 process 終止自己，而 `kill`（[kernel/proc.c:598](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/proc.c#L598)）則允許某個 process 請求終止另一個 process。 讓 `kill` 直接銷毀目標 process 會太過複雜，因為該目標可能正在另一個 CPU 上執行，甚至可能正處於對 kernel 資料結構進行敏感更新的途中。 因此 `kill` 所做的事情非常簡單：它只會設置目標 process 的 `p->killed`，如果該 process 正在睡眠狀態，也會喚醒它
+
+最終這個被 `kill` 的 process 會進入或離開 kernel，而在那個時間點，`usertrap` 中的程式碼會檢查 `p->killed` 是否有被設置（它透過呼叫 `killed` 來檢查，見 [kernel/proc.c:627](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/proc.c#L627)），如果有被設置就呼叫 `exit`。 如果該 process 當時正執行在 user space，它很快就會因為系統呼叫或 timer（或其他裝置）的中斷而進入 kernel
+
+::: tip  
+`kill` 並不會馬上讓目標 process 終止，因為 process 可能正在 user space 執行，甚至可能正在別的 CPU 上處理一些尚未完成的 kernel 操作。 為了避免 race condition 或破壞 kernel 的一致性，xv6 的做法是設一個 `p->killed` flag，然後等待目標 process 自己進入 kernel（可能是被中斷打斷或做系統呼叫），再由 `usertrap` 判斷是否要執行 `exit`。 使用的是延遲中止的設計  
+:::
+
+如果目標 process 此時正在 `sleep`，那麼 `kill` 呼叫 `wakeup` 就會讓它從 `sleep` 返回。 這其實是有潛在風險的，因為原本等待的條件可能仍然不成立。 不過，在 xv6 裡，所有對 `sleep` 的呼叫都包在一個 while 迴圈中，`sleep` 返回之後會重新檢查條件。 有些 `sleep` 的呼叫還會在迴圈中檢查 `p->killed`，如果發現它被設置了，就會放棄目前的行為。 這只有在放棄當前操作是合理的情況下才會這樣做，例如 pipe 的讀寫程式碼（[kernel/pipe.c:84](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/pipe.c#L84)）就會在 `killed` 被設置時直接返回； 之後程式流程會回到 trap，那裡會再一次檢查 `p->killed`，然後執行 `exit`
+
+有些 xv6 中的 `sleep` 迴圈並不會檢查 `p->killed`，因為這些程式碼正處於一個原子性的 multi-step system call 中。 virtio driver 就是一個例子（[kernel/virtio_disk.c:285](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/virtio_disk.c#L285)）：它不會檢查 `p->killed`，因為單個 disk 操作可能是數個寫入中的其中一部分，而這些寫入全部完成後，檔案系統的狀態才會是正確的。 如果一個 process 在等待 disk I/O 的期間被 kill，它仍然會完成目前的系統呼叫，等回到 `usertrap` 時才會檢查 `killed` flag 並結束
