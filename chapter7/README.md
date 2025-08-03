@@ -480,3 +480,77 @@ wakeup(void *chan)
 有時會有多個 process 同時在同一個 channel 上睡眠，例如多個 process 同時對一個 pipe 進行讀取，則只需一個 `wakeup` 就會把它們全部喚醒。 當中有一個 process 會先被執行，並成功取得 `sleep` 時用的鎖，在 pipe 的情況下，它會讀走等待中的資料。 其他 process 雖然也被喚醒，卻會發現沒有資料可讀。 從它們的角度來看，這次喚醒是「虛假的（spurious）」，它們必須再次進入睡眠。 也因此，`sleep` 一定會包在一個會檢查條件的迴圈中
 
 即使兩個 sleep/wakeup 使用者不小心選了相同的 channel，也不會造成什麼問題：它們可能會遇到 spurious wakeup 的問題，但只要照上面所說的方式加上迴圈，就可以容忍這種情況。 sleep/wakeup 的設計魅力之一，就在於它既輕量（不需要額外建立用來表示 sleep channel 的特殊資料結構），又提供了一層間接性（呼叫者不需要知道自己在跟哪個特定的 process 互動）
+
+## 7.7 Code: Pipes
+
+xv6 中對 pipe 的實作是一個以 `sleep` 和 `wakeup` 同步 producer 與 consumer 的更複雜的例子。 我們在第一章中看過 pipe 的介面：寫入 pipe 一端的 byte 會被複製進 kernel 內部的 buffer 中，之後可以從另一端讀出。 後面的章節會探討圍繞 pipe 的 file descriptor 支援，但我們現在先來看 `pipewrite` 與 `piperead` 的實作
+
+每個 pipe 都用一個 `struct pipe` 來表示，其中包含一個 `lock` 和一個 `data` buffer。 `nread` 與 `nwrite` 這兩個欄位分別記錄從 buffer 中讀出的總 byte 數與寫入的總 byte 數。 這個 buffer 是環狀的：在寫入到 `buf[PIPESIZE-1]` 之後，下一個 byte 會被寫入到 `buf[0]`。 但計數器 `nread` 和 `nwrite` 並不會像這樣回繞
+
+這種設計讓實作可以簡單地區分 buffer 已滿（`nwrite == nread + PIPESIZE`）與 buffer 為空（`nwrite == nread`）的狀態，但也意味著對 buffer 的存取必須使用 `buf[nread % PIPESIZE]`，不能直接用 `buf[nread]`（對 `nwrite` 也是如此）
+
+假設此時有兩個不同 CPU 同時分別呼叫 `piperead` 與 `pipewrite`。 `pipewrite`（[kernel/pipe.c:77](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/pipe.c#L77)）會先取得 pipe 的鎖，這把鎖保護的是計數器、資料與相關的不變性。 此時 `piperead`（[kernel/pipe.c:106](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/pipe.c#L106)）也會嘗試取得這把鎖，但這會失敗，因此它會卡在 `acquire` 中（[kernel/spinlock.c:22](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/spinlock.c#L22)）自旋等待鎖釋放
+
+```c
+int
+pipewrite(struct pipe *pi, uint64 addr, int n)
+{
+  int i = 0;
+  struct proc *pr = myproc();
+
+  acquire(&pi->lock);
+  while(i < n){
+    if(pi->readopen == 0 || killed(pr)){
+      release(&pi->lock);
+      return -1;
+    }
+    if(pi->nwrite == pi->nread + PIPESIZE){ //DOC: pipewrite-full
+      wakeup(&pi->nread);
+      sleep(&pi->nwrite, &pi->lock);
+    } else {
+      char ch;
+      if(copyin(pr->pagetable, &ch, addr + i, 1) == -1)
+        break;
+      pi->data[pi->nwrite++ % PIPESIZE] = ch;
+      i++;
+    }
+  }
+  wakeup(&pi->nread);
+  release(&pi->lock);
+
+  return i;
+}
+
+int
+piperead(struct pipe *pi, uint64 addr, int n)
+{
+  int i;
+  struct proc *pr = myproc();
+  char ch;
+
+  acquire(&pi->lock);
+  while(pi->nread == pi->nwrite && pi->writeopen){  //DOC: pipe-empty
+    if(killed(pr)){
+      release(&pi->lock);
+      return -1;
+    }
+    sleep(&pi->nread, &pi->lock); //DOC: piperead-sleep
+  }
+  for(i = 0; i < n; i++){  //DOC: piperead-copy
+    if(pi->nread == pi->nwrite)
+      break;
+    ch = pi->data[pi->nread++ % PIPESIZE];
+    if(copyout(pr->pagetable, addr + i, &ch, 1) == -1)
+      break;
+  }
+  wakeup(&pi->nwrite);  //DOC: piperead-wakeup
+  release(&pi->lock);
+  return i;
+}
+```
+
+當 `piperead` 還在等待時，`pipewrite` 會在迴圈中逐一將 `addr[0..n-1]` 的資料寫進 pipe（[kernel/pipe.c:95](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/pipe.c#L95)）。 在這個過程中，可能會遇到 buffer 被填滿的情況（[kernel/pipe.c:88](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/pipe.c#L88)），此時 `pipewrite` 會呼叫 `wakeup` 去通知任何正在等待的 reader，表示 buffer 裡有資料可讀，然後自己對 `&pi->nwrite` 呼叫 `sleep`，等待某個 reader 從 buffer 中拿走一些 byte。 這個 `sleep` 在讓 `pipewrite` 的 process 進入睡眠狀態的會同時釋放 `pipe` 的 `lock`
+
+此時 `piperead` 取得了 pipe 的 lock 並進入 critical section：它發現 `pi->nread != pi->nwrite`（[kernel/pipe.c:113](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/pipe.c#L113)）（這代表之前 `pipewrite` 是因為 `pi->nwrite == pi->nread + PIPESIZE` 而進入 `sleep` 的，見 [kernel/pipe.c:88](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/pipe.c#L88)），所以接著進入 for 迴圈，從 pipe 中複製資料出去（[kernel/pipe.c:120](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/pipe.c#L120)），並根據複製的 byte 數增加 `nread`。 此時這些空出來的 byte 就又可供寫入了，因此 `piperead` 會呼叫 `wakeup`（[kernel/pipe.c:127](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/pipe.c#L127)）喚醒可能在等待的 writer。 wakeup 會找到那個在 `&pi->nwrite` 上睡眠的 process，也就是之前因為 buffer 滿了而進入 sleep 的 `pipewrite` process，並將該 process 標記為 `RUNNABLE`
+
+pipe 的程式碼為 reader 和 writer 使用了不同的 sleep channel（分別為 `pi->nread` 與 `pi->nwrite`）； 這麼做可能會讓系統在有大量 reader 和 writer 同時等待同一條 pipe 的情況下更有效率。 pipe 的 sleep 都寫在一個會檢查條件的迴圈中； 如果有多個 reader 或 writer，其中第一個醒來的 process 會發現條件滿足，而其他人會因為條件還不成立再次進入 sleep
