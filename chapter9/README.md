@@ -54,3 +54,17 @@ pipeclose(struct pipe *pi, int writable)
 根據 C 語言的標準，這類 race 屬於 undefined behavior，也就是該程式可能會當機或產生錯誤結果（參見 cppreference 上的「[Threads and data races](https://en.cppreference.com/w/c/language/memory_model.html)」）。 加上 lock 就能避免這樣的 race，也就避免了 undefined behavior
 
 race 會破壞程式正確性的其中一個原因是，如果沒有使用 lock 或其他等效機制，編譯器可能會產生與原始 C 程式碼邏輯完全不同的機器碼來進行記憶體的讀寫。 例如，一個 thread 呼叫 `killed` 時，其機器碼可能會將 `p->killed` 的值複製到暫存器中，之後就只讀這個快取的值； 這將導致該 thread 永遠看不到其他 thread 對 `p->killed` 所做的任何寫入。 而使用 lock 則能避免這種快取行為
+
+## 9.2 Lock-like patterns
+
+在 xv6 的許多地方，系統會以 reference count 或 flag 的方式，模擬類似 lock 的行為，用來表示某個物件目前處於已配置（allocated）狀態，因此不應該被釋放或重新使用。 像是 process 的 `p->state` 就具有這種效果，而 `file`、`inode` 與 `buf` 結構中的 reference count 也是如此。 雖然這些 flag 或 reference count 本身都會受到 lock 保護，但真正防止物件被過早釋放的，其實是這些 reference count 本身
+
+檔案系統會使用 `struct inode` 的 reference count 作為一種共享 lock，這樣可以讓多個 process 同時持有，以避免那些使用一般 lock 可能發生的 deadlock。 例如，`namex` 中的迴圈（[kernel/fs.c:652](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L652)）會依序對每個 path component 所對應的目錄加鎖
+
+而 `namex` 在每次迴圈結束時必須釋放該鎖，否則若 path 中包含 `.`（例如 `a/./b`），就可能會導致自身 deadlock。 也可能與另一個正在查找 `..` 的 thread 發生死結。 如第八章中解釋的，解法是讓迴圈將目前的 directory inode 帶到下一輪，但只增加 reference count 而不加鎖
+
+有些資料項目在不同時期會受到不同機制的保護，有時甚至並非透過明確的 lock，而是透過 xv6 程式碼的結構隱含地避免了並發存取。 例如，當一個 physical page 處於 free 狀態時，它會受到 `kmem.lock` 的保護（[kernel/kalloc.c:24](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/kalloc.c#L24)）。 若該 page 被分配成一個 pipe（[kernel/pipe.c:23](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/pipe.c#L23)），它則會受到另一把 lock（`pi->lock`）的保護。 如果這個 page 被分配為某個新 process 的 user memory，那它甚至完全沒有受到任何 lock 保護，而是仰賴配置器的行為保證：只要 page 尚未被釋放，就不會分配給其他 process，因此也不會有並發使用的問題
+
+一個新 process 的 memory 擁有權的轉移過程相當複雜：一開始由 parent 在 `fork` 中配置與操作，然後由 child 使用，最後當 child 結束時，又回到 parent 手上，並交由 `kfree` 釋放。 這裡可學到兩點：第一，某個資料物件在生命週期的不同階段，可能會以不同方式被保護； 第二，這種保護有時可能是隱含的結構性設計，而非顯式地使用 lock
+
+最後一個類似 lock 的例子是：在呼叫 `mycpu()`（[kernel/proc.c:83](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/proc.c#L83)）時需要關閉中斷。 關閉中斷可以讓該段程式在執行期間，不會被 timer interrupt 打斷，進而強制發生 context switch，將 process 切換到另一顆 CPU
