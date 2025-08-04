@@ -215,7 +215,7 @@ xv6 對於例外狀況的反應相當無趣：如果例外發生在 user space�
 
 COW `fork` 的基本做法是，讓 parent 和 child 一開始共享所有的 page frame，但他們各自都會將這些 page 設成唯讀的（`PTE_W` 欄位清 0）。 parent 和 child 都可以讀取這些共享記憶體，但如果任一方對某個 page 做了寫入操作，RISC-V CPU 就會產生一個 page-fault exception。 kernel 的 trap handler 會處理這個例外：它會配置一張新的 page frame，並把發生 fault 時那個位址對應的 page frame 的內容複製過去。 然後 kernel 會更新發生 fault 的 process 的 page table，把對應的 PTE 改成指向新的 page frame，並允許讀寫
 
-最後 kernel 會讓該 process 從造成 fault 的那條指令重新執行。 而因為這時 PTE 已經允許寫入了，所以這次執行就不會再觸發 page fault。 copy-on-write 需要維護額外的資訊來追蹤哪些 page frame 可以被釋放，因為每張 page 可能會被多張 page table 所參考，這些參考會隨著 fork、page fault、exec 和 exit 而改變。 這樣的記錄機制還帶來一個重要的最佳化：如果某個 process 發生 store page fault，但該 page frame 只有被它自己的 page table 參考，那其實就不需要做複製
+最後 kernel 會讓該 process 從造成 fault 的那條指令重新執行。 而因為這時 PTE 已經允許寫入了，所以這次執行就不會再觸發 page fault。 copy-on-write 需要維護額外的資訊來追蹤哪些 page frame 可以被釋放，因為每張 page 可能會被多張 page table 所引用，這些引用會隨著 fork、page fault、exec 和 exit 而改變。 這樣的記錄機制還帶來一個重要的最佳化：如果某個 process 發生 store page fault，但該 page frame 只有被它自己的 page table 引用，那其實就不需要做複製
 
 copy-on-write 可以讓 `fork` 更快，因為在 fork 的當下不需要複製記憶體。 雖然之後在寫入時還是可能得做複製，但實際上大多數記憶體都不需要真的被複製。 常見的一個例子是 `fork` 後馬上做 `exec`：在 `fork` 之後可能只有少數的 page 被寫入，而 child 的 `exec` 又會釋放掉大部分從 parent 繼承來的記憶體。 copy-on-write `fork` 可以避免複製這些記憶體。 此外，COW `fork` 是透明的，其不需要對應用程式做任何修改，它們就能自動受益
 
@@ -233,7 +233,7 @@ page table 和 page fault 的組合，除了能實作 COW `fork` 以外，還能
 
 接著如果應用程式試圖使用某個已經被 swap out 到硬碟的 page，便會觸發 page fault，此時該 page 必須被 swap in：kernel 的 trap handler 會配置一張實體記憶體，將對應的資料從硬碟讀回 RAM，然後更新對應的 PTE，讓它指向這張新的 page frame
 
-如果某個 page 需要被 swap in，但當下已經沒有任何可用的實體記憶體了，這種情況下 kernel 必須先釋放出一張 page frame，方法是將其中的一個 page 做 swap out，也就是把它「搬移」到硬碟上的 swap space，並將所有參考該 page 的 PTE 標記為 invalid
+如果某個 page 需要被 swap in，但當下已經沒有任何可用的實體記憶體了，這種情況下 kernel 必須先釋放出一張 page frame，方法是將其中的一個 page 做 swap out，也就是把它「搬移」到硬碟上的 swap space，並將所有引用該 page 的 PTE 標記為 invalid
 
 不過「搬移」的成本很高，因此在它不常發生的情況下 paging 的表現較好，這代表應用程式只會使用其分配記憶體中的一小部分，而且這些常用 page 的總能被放在記憶體裡。 這種特性通常被稱為良好的 locality of reference。 就像其他許多虛擬記憶體技術一樣，kernel 通常會讓 swapping 對應用程式來說是透明的
 

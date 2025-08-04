@@ -114,7 +114,7 @@ printf("exec error\n");
 
 xv6 的 shell 使用上述系統呼叫來代替使用者執行程式。 這個 shell 的主體結構相當簡單，可以參考 [user/sh.c:146](https://github.com/mit-pdos/xv6-riscv/blob/riscv//user/sh.c#L146) 中的 `main` 函式。 主迴圈會透過 `getcmd` 從使用者那讀取一行輸入。 接著它會呼叫 `fork`，建立 shell 行程的複本。 父行程會呼叫 `wait`，而子行程則負責執行命令
 
-例如，如果使用者在 shell 中輸入 `"echo hello"`，`runcmd` 就會被呼叫，並以 `"echo hello"` 作為引數。 `runcmd`（參考 [user/sh.c:55](https://github.com/mit-pdos/xv6-riscv/blob/riscv//user/sh.c#L55)）會執行真正的命令。 對於 `"echo hello"`，它會呼叫 `exec`（見 [user/sh.c:79](https://github.com/mit-pdos/xv6-riscv/blob/riscv//user/sh.c#L79)）。 如果 `exec` 成功，子行程就會開始執行 `echo` 的指令，而不是 `runcmd`。 之後的某個時間點，`echo` 會呼叫 `exit`，此時父行程中的 `wait` 會返回，控制流程便會回到 `main` 函式中（見 [user/sh.c:146](https://github.com/mit-pdos/xv6-riscv/blob/riscv//user/sh.c#L146)）
+例如，如果使用者在 shell 中輸入 `"echo hello"`，`runcmd` 就會被呼叫，並以 `"echo hello"` 作為引數。 `runcmd`（[user/sh.c:55](https://github.com/mit-pdos/xv6-riscv/blob/riscv//user/sh.c#L55)）會執行真正的命令。 對於 `"echo hello"`，它會呼叫 `exec`（見 [user/sh.c:79](https://github.com/mit-pdos/xv6-riscv/blob/riscv//user/sh.c#L79)）。 如果 `exec` 成功，子行程就會開始執行 `echo` 的指令，而不是 `runcmd`。 之後的某個時間點，`echo` 會呼叫 `exit`，此時父行程中的 `wait` 會返回，控制流程便會回到 `main` 函式中（見 [user/sh.c:146](https://github.com/mit-pdos/xv6-riscv/blob/riscv//user/sh.c#L146)）
 
 你可能會想，為什麼 `fork` 和 `exec` 不直接合併成一個呼叫； 我們稍後會看到，shell 透過分離它們來實作 I/O 的重導（redirection）功能。 為了避免「建立一個行程複本、接著馬上被 `exec` 替換掉」這種浪費，kernel 會針對這類用途對 `fork` 的實作進行最佳化，例如採用虛擬記憶體技術中的 copy-on-write（詳見第 4.6 節）
 
@@ -262,7 +262,7 @@ echo hello world >/tmp/xyz; wc </tmp/xyz
 
 ## 1.4 File system
 
-xv6 的檔案系統提供了「資料檔案（data files）」與「目錄（directories）」，前者的內容是未經詮釋的位元組陣列，而後者的內容是指向資料檔案與其他目錄的具名參考（reference）。 目錄之間會形成一棵樹狀結構，其從一個特別的目錄開始，稱為 root（根目錄）。 像 `/a/b/c` 這樣的路徑，表示在根目錄 `/` 底下的 `a` 目錄中的 `b` 目錄中的 `c` 檔案或目錄。 如果路徑不是以 `/` 開頭，則會根據呼叫該程式的行程「當下的目前目錄（current directory）」來解析； 這個目前目錄可以透過 `chdir` 系統呼叫來變更
+xv6 的檔案系統提供了「資料檔案（data files）」與「目錄（directories）」，前者的內容是未經詮釋的位元組陣列，而後者的內容是指向資料檔案與其他目錄的具名引用（named reference）。 目錄之間會形成一棵樹狀結構，其從一個特別的目錄開始，稱為 root（根目錄）。 像 `/a/b/c` 這樣的路徑，表示在根目錄 `/` 底下的 `a` 目錄中的 `b` 目錄中的 `c` 檔案或目錄。 如果路徑不是以 `/` 開頭，則會根據呼叫該程式的行程「當下的目前目錄（current directory）」來解析； 這個目前目錄可以透過 `chdir` 系統呼叫來變更
 
 以下兩段程式碼會開啟同一個檔案（假設中間所有目錄皆已存在）：
 
@@ -293,7 +293,7 @@ mknod("/console", 1, 1);
 
 `mknod` 會建立一個特殊檔案，該檔案代表一個裝置。 與裝置檔案相關聯的是主裝置號與次裝置號（即 `mknod` 的兩個引數），其能用來唯一識別一個 kernel 中的裝置。 之後行程開啟該裝置檔案時，kernel 會將 `read` 和 `write` 系統呼叫轉向裝置驅動程式的實作，而不是交由檔案系統處理
 
-一個檔案的名稱與該檔案本身是分開的； 同一個底層檔案（稱為 inode）可以對應到多個名稱，這些名稱被稱為「連結（link）」。 每個連結都是一個目錄項目，該項目包含一個檔案名稱以及對一個 inode 的參考。 inode 存放的是關於該檔案的中繼資料（metadata），包括檔案類型（檔案、目錄或裝置）、檔案長度、檔案在硬碟上的內容位置，以及該檔案被多少個連結所參考
+一個檔案的名稱與該檔案本身是分開的； 同一個底層檔案（稱為 inode）可以對應到多個名稱，這些名稱被稱為「連結（link）」。 每個連結都是一個目錄項目，該項目包含一個檔案名稱以及對一個 inode 的引用。 inode 存放的是關於該檔案的中繼資料（metadata），包括檔案類型（檔案、目錄或裝置）、檔案長度、檔案在硬碟上的內容位置，以及該檔案被多少個連結所引用
 
 `fstat` 系統呼叫會從檔案描述符所對應的 inode 中取得資訊。 它會填入一個 `struct stat` 結構，該結構在 `stat.h`（[kernel/stat.h](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/stat.h)）中的定義如下：
 

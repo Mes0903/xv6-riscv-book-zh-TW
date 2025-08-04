@@ -205,11 +205,11 @@ brelse(struct buf *b)
 }
 ```
 
-`bget` 中的兩段迴圈就是利用了這種排序方式：在尋找既有 buffer 的那一段，最糟情況下會掃過整個 list，但若有良好的區域性參考性（locality），從 `bcache.head` 開始沿著 next 指標往後找，就能縮短搜尋時間。 而在找出可回收 buffer 的那段，則是從 list 的尾端開始，沿著 `prev` 指標反向找，選出最久未使用的 buffer
+`bget` 中的兩段迴圈就是利用了這種排序方式：在尋找既有 buffer 的那一段，最糟情況下會掃過整個 list，但若有良好的區域性（locality），從 `bcache.head` 開始沿著 next 指標往後找，就能縮短搜尋時間。 而在找出可回收 buffer 的那段，則是從 list 的尾端開始，沿著 `prev` 指標反向找，選出最久未使用的 buffer
 
 ## 8.4 Logging layer
 
-在檔案系統設計中，當機復原（crash recovery）是一個非常有趣的問題。 這個問題的來自於許多檔案系統的操作會包含多次對硬碟的寫入，如果在這些寫入只完成一部分時系統發生當機，那麼硬碟上的檔案系統可能會變成不一致的狀態。 例如，假設當機發生在執行 file truncation（將檔案長度設為 0 並釋放其內容區塊）的過程中。 根據磁碟寫入的順序不同，當機後可能會出現以下兩種情況之一：第一種是 inode 仍然指向某個實際上已被標記為「空閒」的區塊，第二種是某個區塊已被配置但卻沒有任何 inode 參考它
+在檔案系統設計中，當機復原（crash recovery）是一個非常有趣的問題。 這個問題的來自於許多檔案系統的操作會包含多次對硬碟的寫入，如果在這些寫入只完成一部分時系統發生當機，那麼硬碟上的檔案系統可能會變成不一致的狀態。 例如，假設當機發生在執行 file truncation（將檔案長度設為 0 並釋放其內容區塊）的過程中。 根據磁碟寫入的順序不同，當機後可能會出現以下兩種情況之一：第一種是 inode 仍然指向某個實際上已被標記為「空閒」的區塊，第二種是某個區塊已被配置但卻沒有任何 inode 引用它
 
 第二種情況相對比較無害； 但對於第一種，若某個 inode 仍然指向一個已被釋放的區塊，在重新開機後很可能會引發嚴重的問題。 因為在重新開機之後，kernel 可能會把該區塊分配給另一個檔案，結果就變成兩個不同的檔案意外地指向同一個區塊。 如果 xv6 有支援多個使用者，這樣的狀況甚至可能變成一個安全漏洞，因為原本的檔案擁有者就可以讀寫新的、屬於其他使用者的檔案資料
 
@@ -576,7 +576,7 @@ struct {
 } itable;
 ```
 
-xv6 的 inode 程式碼用了四種鎖或與鎖類似的機制：`itable.lock` 保證「同一個 inode 最多只在 inode table 中出現一次」以及「`ref` 計數正確」這兩項不變式； 每個記憶體 inode 內的 `lock`（sleep-lock）負責確保對 inode 欄位與其檔案／目錄內容區塊的互斥存取； `ref` 只要大於零，系統就會將 inode 維持在表中，且不會把這個槽位給別的 inode 用； 最後，`nlink` 欄位會記錄參考到該檔案的 directory entry 數量，只要大於零，xv6 就不會釋放該 inode
+xv6 的 inode 程式碼用了四種鎖或與鎖類似的機制：`itable.lock` 保證「同一個 inode 最多只在 inode table 中出現一次」以及「`ref` 計數正確」這兩項不變式； 每個記憶體 inode 內的 `lock`（sleep-lock）負責確保對 inode 欄位與其檔案／目錄內容區塊的互斥存取； `ref` 只要大於零，系統就會將 inode 維持在表中，且不會把這個槽位給別的 inode 用； 最後，`nlink` 欄位會記錄引用到該檔案的 directory entry 數量，只要大於零，xv6 就不會釋放該 inode
 
 在對應的 `iput()` 呼叫之前，由 `iget()` 取得的 `struct inode` 的指標保證是有效的：該 inode 不會被刪除，且這段記憶體不會指派給別的 inode。 `iget()` 提供非獨占（non-exclusive）存取，因此同一 inode 可被多個指標共用。 檔案系統中有大量程式碼仰賴此語義，這使其既能長期持有 inode（如開啟檔案、目前目錄），又能在處理多個 inode（如路徑解析）時避免競爭與死鎖
 
@@ -747,7 +747,7 @@ ialloc(uint dev, short type)
 }
 ```
 
-`iget`（[kernel/fs.c:247](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L247)）會在 inode table 中搜尋符合指定裝置與 inode number 條件的活躍項目（`ip->ref > 0`）； 若找到，就回傳該 inode 的新參考（[kernel/fs.c:256-260](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L256-L260)）。 搜尋過程中它會將遇到的第一個空槽暫存起來（[kernel/fs.c:261-262](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L261-L262)），以便在沒找到的時候用來放入新的 table 項目
+`iget`（[kernel/fs.c:247](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L247)）會在 inode table 中搜尋符合指定裝置與 inode number 條件的活躍項目（`ip->ref > 0`）； 若找到，就回傳該 inode 的新引用（[kernel/fs.c:256-260](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L256-L260)）。 搜尋過程中它會將遇到的第一個空槽暫存起來（[kernel/fs.c:261-262](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L261-L262)），以便在沒找到的時候用來放入新的 table 項目
 
 ```c
 // Find the inode with number inum on device dev
@@ -830,17 +830,17 @@ iunlock(struct inode *ip)
 }
 ```
 
-`iput`（[kernel/fs.c:337](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L337)）會透過將參考計數減一（[kernel/fs.c:360](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L360)）來釋放指向某 inode 的 C 語言指標； 如果它是最後一個參考，則它在 inode table 中的槽位就會轉為空閒槽位，供其他 inode 使用
+`iput`（[kernel/fs.c:337](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L337)）會透過將引用計數減一（[kernel/fs.c:360](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L360)）來釋放指向某 inode 的 C 語言指標； 如果它是最後一個引用，則它在 inode table 中的槽位就會轉為空閒槽位，供其他 inode 使用
 
-如果 `iput` 發現某個 inode 已不再被任何 C 指標所參考，且也沒有任何硬連結指向它（也就是沒有出現在任何目錄中），那麼它會釋放該 inode 和其對應的 data block。 `iput` 會呼叫 `itrunc`，將檔案截短為 0 位元組來釋放資料區塊，接著將該 inode 的類型欄位設為 0（代表未分配），最後把 inode 寫回磁碟（[kernel/fs.c:342](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L342)）
+如果 `iput` 發現某個 inode 已不再被任何 C 指標所引用，且也沒有任何硬連結指向它（也就是沒有出現在任何目錄中），那麼它會釋放該 inode 和其對應的 data block。 `iput` 會呼叫 `itrunc`，將檔案截短為 0 位元組來釋放資料區塊，接著將該 inode 的類型欄位設為 0（代表未分配），最後把 inode 寫回磁碟（[kernel/fs.c:342](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L342)）
 
 `iput` 釋放 inode 時的 locking 機制值得深入探討。 一種潛在風險是：其他執行緒可能正在 `ilock` 中等待這個 inode，例如想要讀取某個檔案或列出某個目錄，此時若 inode 已被釋放則會出現錯誤。 不過這種情況不會發生，因為如果某個 inode 沒有 link，且 `ip->ref` 是 1，那麼除了目前呼叫 `iput` 的執行緒外，系統中沒有其他地方會持有指向這個 inode 的指標
 
 另一種潛在風險是：釋放時同時有另一個執行緒呼叫 `ialloc`，並且選中了 `iput` 正在釋放的那個 inode。 不過這種情況只有在 `iupdate` 將 inode 的 type 寫成 0（代表未分配）後才會發生，因此這樣的競爭條件是良性的：因為分配 inode 的那個執行緒會在讀寫 inode 前先取得該 inode 的 sleep-lock，此時 `iput` 已經完成它的動作了
 
-`iput()` 可能會對硬碟進行寫入。 這代表，只要是會使用到檔案系統的 system call，就有可能對硬碟寫入，因為該 system call 有可能是系統中最後一個持有該檔案參照的地方。 即使像 `read()` 這種看起來是唯讀的呼叫，最終也可能呼叫到 `iput()`。 因此，只要是涉及檔案系統的 system call，即使表面上是唯讀的，也必須包在 transaction 裡
+`iput()` 可能會對硬碟進行寫入。 這代表，只要是會使用到檔案系統的 system call，就有可能對硬碟寫入，因為該 system call 有可能是系統中最後一個持有該檔案引用的地方。 即使像 `read()` 這種看起來是唯讀的呼叫，最終也可能呼叫到 `iput()`。 因此，只要是涉及檔案系統的 system call，即使表面上是唯讀的，也必須包在 transaction 裡
 
-`iput()` 和系統崩潰之間存在一個棘手的交互情況。 當某個檔案的 link count 降到 0 時，`iput()` 不會馬上把檔案截斷，因為可能還有某個 process 持有對該 inode 的記憶體參照：有某個 process 曾成功開啟該檔案並可能會再進行讀寫。 不過，如果在最後一個 process 關閉檔案描述符之前系統崩潰，那麼該檔案在硬碟上會仍被標記為 allocated，但已經沒有任何 directory entry 指向它了
+`iput()` 和系統崩潰之間存在一個棘手的交互情況。 當某個檔案的 link count 降到 0 時，`iput()` 不會馬上把檔案截斷，因為可能還有某個 process 持有對該 inode 的記憶體引用：有某個 process 曾成功開啟該檔案並可能會再進行讀寫。 不過，如果在最後一個 process 關閉檔案描述符之前系統崩潰，那麼該檔案在硬碟上會仍被標記為 allocated，但已經沒有任何 directory entry 指向它了
 
 檔案系統處理這種情況的方法有兩種。 最簡單的方式是在重開機後進行 recovery 時，掃描整個檔案系統，找出那些被標記為 allocated 卻沒有任何 directory entry 指向它們的檔案。 只要找到這種檔案，就可以將其釋放
 
@@ -1233,7 +1233,7 @@ struct {
 
 借助底層提供的那些函式，大多數 system call 的實作都非常簡單（[kernel/sysfile.c](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/sysfile.c)）。 不過有幾個 system call 值得我們深入探討
 
-`sys_link` 和 `sys_unlink` 這兩個函式會修改目錄，也就是建立或移除 inode 的參照，這兩個函式是「使用 transaction 的好例子」。 `sys_link`（[kernel/sysfile.c:124](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/sysfile.c#L124)）首先會抓取兩個字串參數 `old` 和 `new`（[kernel/sysfile.c:129](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/sysfile.c#L129)）。 假設 `old` 存在且不是目錄（[kernel/sysfile.c:133-136](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/sysfile.c#L133-L136)），`sys_link` 就會把它的 `ip->nlink` 參照計數加一
+`sys_link` 和 `sys_unlink` 這兩個函式會修改目錄，也就是建立或移除 inode 的引用，這兩個函式是「使用 transaction 的好例子」。 `sys_link`（[kernel/sysfile.c:124](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/sysfile.c#L124)）首先會抓取兩個字串參數 `old` 和 `new`（[kernel/sysfile.c:129](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/sysfile.c#L129)）。 假設 `old` 存在且不是目錄（[kernel/sysfile.c:133-136](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/sysfile.c#L133-L136)），`sys_link` 就會把它的 `ip->nlink` 引用計數加一
 
 接著 `sys_link` 會呼叫 `nameiparent` 找出 `new` 的父目錄與最後一段名稱（[kernel/sysfile.c:149](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/sysfile.c#L149)），然後在該目錄中建立一個新的 directory entry 指向 `old` 的 `inode`（[kernel/sysfile.c:152](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/sysfile.c#L152)）。 這個新建立的父目錄必須存在，且必須和 `old` 的 inode 在同一個裝置上，因為 inode number 只有在單一磁碟上才具有唯一性。如果出現這類錯誤，`sys_link` 必須回頭把 `ip->nlink` 減回來
 

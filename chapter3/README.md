@@ -25,7 +25,7 @@ xv6 運行在 Sv39 的 RISC-V 架構上，這代表 64 位元虛擬位址中，�
 page frame 指的是實體記憶體的 page，原文為 physical page，因此 page frame 的編號才會縮寫為 PPN（physical page number）  
 :::
 
-paging hardware 會使用 39 位元中最高的 27 位元作為索引查找 page table，找到對應的 PTE，然後組合成一個 56 位元的實體位址：位址的高 44 位元來自 PTE 裡的 PPN，低 12 位元則直接複製自原本虛擬位址中的低 12 位。 圖 3.1 顯示了這個流程，其使用一個簡化為 PTE 陣列的邏輯 page table 來呈現（更完整的結構請參考圖 3.2）。 page table 讓作業系統可以用 4096（2<sup>12</sup>）位元組對齊的區塊為單位，控制虛擬位址到實體位址的對應關係。 這種區塊就被稱作「page」
+paging hardware 會使用 39 位元中最高的 27 位元作為索引查找 page table，找到對應的 PTE，然後組合成一個 56 位元的實體位址：位址的高 44 位元來自 PTE 裡的 PPN，低 12 位元則直接複製自原本虛擬位址中的低 12 位。 圖 3.1 顯示了這個流程，其使用一個簡化為 PTE 陣列的邏輯 page table 來呈現（更完整的結構請見圖 3.2）。 page table 讓作業系統可以用 4096（2<sup>12</sup>）位元組對齊的區塊為單位，控制虛擬位址到實體位址的對應關係。 這種區塊就被稱作「page」
 
 ![（Figure 3.1: RISC-V virtual and physical addresses, with a simplified logical page table.）](image/riscv_address.png)
 
