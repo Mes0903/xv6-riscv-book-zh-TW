@@ -1035,3 +1035,88 @@ writei(struct inode *ip, int user_src, uint64 src, uint off, uint n)
 ```
 
 `stati` 函式（[kernel/fs.c:458](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L458)）會將 inode 的 metadata 複製到 `stat` 結構中，該結構會透過 `stat` 系統呼叫暴露給使用者程式
+
+## 8.11 Code: directory layer
+
+目錄在內部的實作方式和一般檔案非常類似。 它的 inode 類型為 `T_DIR`，其資料部分則是一連串的 directory entry。 每個 entry 是一個 `struct dirent`（[kernel/fs.h:56](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.h#L56)），其中包含了一個名稱以及一個 inode number。 名稱最多為 `DIRSIZ`（14）個字元； 若長度不足，則以 NULL（0）位元組作為結尾。 inode number 為零的 directory entry 被視為未使用的空白 entry
+
+```c
+// Directory is a file containing a sequence of dirent structures.
+#define DIRSIZ 14
+
+struct dirent {
+  ushort inum;
+  char name[DIRSIZ];
+};
+```
+
+`dirlookup` 函式（[kernel/fs.c:552](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L552)）會在某個目錄（`dp`）中搜尋名稱符合指定字串的 entry。 若找到了，就會回傳對應的 inode（未加鎖），並將 `*poff` 設為該 entry 在該目錄中所對應的位元組偏移量，這是為了讓呼叫者可以對該 entry 進行修改。 如果 `dirlookup` 成功找到對應名稱的 entry，它會更新 `*poff`，並透過 `iget` 取得該 inode 並回傳（仍是未加鎖狀態）
+
+`dirlookup` 是 `iget` 會回傳「未加鎖」inode 的主因，因為呼叫 `dirlookup` 的 caller 已經先對 `dp` 上鎖了，因此如果搜尋的是 `.`（代表目前目錄的別名），如果在回傳前試圖再次對該 inode 上鎖，會導致對 `dp` 的重複上鎖並造成 deadlock 實際上還有更複雜的 deadlock 情境，涉及多個 process 與 `..`（父目錄的別名），所以 `.` 並不是唯一的問題。 因此正確做法是讓 caller 在收到 inode 後先解鎖 `dp`，再去對 `ip` 上鎖，以確保任一時刻只持有一個鎖
+
+```c
+// Look for a directory entry in a directory.
+// If found, set *poff to byte offset of entry.
+struct inode*
+dirlookup(struct inode *dp, char *name, uint *poff)
+{
+  uint off, inum;
+  struct dirent de;
+
+  if(dp->type != T_DIR)
+    panic("dirlookup not DIR");
+
+  for(off = 0; off < dp->size; off += sizeof(de)){
+    if(readi(dp, 0, (uint64)&de, off, sizeof(de)) != sizeof(de))
+      panic("dirlookup read");
+    if(de.inum == 0)
+      continue;
+    if(namecmp(name, de.name) == 0){
+      // entry matches path element
+      if(poff)
+        *poff = off;
+      inum = de.inum;
+      return iget(dp->dev, inum);
+    }
+  }
+
+  return 0;
+}
+```
+
+`dirlink` 函式（[kernel/fs.c:580](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L580)）會將一個新的 directory entry 寫入指定的目錄 `dp`，這個 entry 具有指定的名稱與 inode number。 如果目錄中已存在該名稱了，則 `dirlink` 會回傳一個錯誤（[kernel/fs.c:586-590](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L586-L590)）
+
+```c
+// Write a new directory entry (name, inum) into the directory dp.
+// Returns 0 on success, -1 on failure (e.g. out of disk blocks).
+int
+dirlink(struct inode *dp, char *name, uint inum)
+{
+  int off;
+  struct dirent de;
+  struct inode *ip;
+
+  // Check that name is not present.
+  if((ip = dirlookup(dp, name, 0)) != 0){
+    iput(ip);
+    return -1;
+  }
+
+  // Look for an empty dirent.
+  for(off = 0; off < dp->size; off += sizeof(de)){
+    if(readi(dp, 0, (uint64)&de, off, sizeof(de)) != sizeof(de))
+      panic("dirlink read");
+    if(de.inum == 0)
+      break;
+  }
+
+  strncpy(de.name, name, DIRSIZ);
+  de.inum = inum;
+  if(writei(dp, 0, (uint64)&de, off, sizeof(de)) != sizeof(de))
+    return -1;
+
+  return 0;
+}
+```
+
+主迴圈會掃描所有 directory entry 以尋找尚未被分配（未使用）的 entry。 一旦找到，就會提早結束迴圈（[kernel/fs.c:592-597](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L592-L597)），並將 `off` 設為該可用 entry 的偏移量。 若找不到空的 entry，迴圈就會結束，這時 `off` 會被設成 `dp->size`。 無論是哪種情況，`dirlink` 都會在 `off` 所指定的位置寫入新的 entry（[kernel/fs.c:602-603](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L602-L603)）
