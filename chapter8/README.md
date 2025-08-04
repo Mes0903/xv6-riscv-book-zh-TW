@@ -1120,3 +1120,75 @@ dirlink(struct inode *dp, char *name, uint inum)
 ```
 
 主迴圈會掃描所有 directory entry 以尋找尚未被分配（未使用）的 entry。 一旦找到，就會提早結束迴圈（[kernel/fs.c:592-597](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L592-L597)），並將 `off` 設為該可用 entry 的偏移量。 若找不到空的 entry，迴圈就會結束，這時 `off` 會被設成 `dp->size`。 無論是哪種情況，`dirlink` 都會在 `off` 所指定的位置寫入新的 entry（[kernel/fs.c:602-603](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L602-L603)）
+
+## 8.12 Code: Path names
+
+路徑名稱查找的過程會依序針對路徑中的每個組件呼叫一次 `dirlookup`。 `namei` 函式（[kernel/fs.c:687](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L687)）會解析 `path` 並回傳對應的 `inode`。 而 `nameiparent` 則是另一種變形版本：它會在處理到最後一個路徑組件之前停止，回傳該路徑的父目錄所對應的 inode，並將最後一個組件複製到變數 `name` 中。 這兩個函式都會呼叫一個通用的底層函式 `namex` 來進行實際的查找工作
+
+```c
+struct inode*
+namei(char *path)
+{
+  char name[DIRSIZ];
+  return namex(path, 0, name);
+}
+
+struct inode*
+nameiparent(char *path, char *name)
+{
+  return namex(path, 1, name);
+}
+```
+
+`namex` 函式（[kernel/fs.c:652](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L652)）一開始會判斷該從哪裡開始進行路徑的解析。 如果 `path` 是以 `/` 開頭，代表從根目錄開始解析； 否則就從目前所在的目錄開始（[kernel/fs.c:656-659](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L656-L659)）。 接著，它會使用 `skipelem` 依序取得路徑中的每個元素（[kernel/fs.c:661](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L661)）。 每次迴圈都會在目前的 inode `ip` 中查找這個名稱。 每一輪開始時，其會先對 `ip` 上鎖，並確認它的類型是否為目錄。 若不是，就會導致查找失敗（[kernel/fs.c:662-666](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L662-L666)）。 對 `ip` 上鎖的目的並不是害怕 `ip->type` 可能會在背景中被改變（這其實不會發生），而是因為在執行 `ilock` 前，我們無法保證 `ip->type` 已經從硬碟載入進來了
+
+如果呼叫的是 `nameiparent`，且這已經是路徑上的最後一個元素了，則依據其設計，會提早結束查找； 最後一個元素已經複製到 `name` 中，因此 `namex` 只需回傳未加鎖的 `ip`（[kernel/fs.c:667-671](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L667-L671)）即可。 最後，這個迴圈會透過 `dirlookup` 查找當前元素，並透過設定 `ip = next` 來進入下一輪查找（[kernel/fs.c:672-677](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L672-L677)）。 當所有 path element 都處理完後，會回傳 `ip`
+
+```c
+// Look up and return the inode for a path name.
+// If parent != 0, return the inode for the parent and copy the final
+// path element into name, which must have room for DIRSIZ bytes.
+// Must be called inside a transaction since it calls iput().
+static struct inode*
+namex(char *path, int nameiparent, char *name)
+{
+  struct inode *ip, *next;
+
+  if(*path == '/')
+    ip = iget(ROOTDEV, ROOTINO);
+  else
+    ip = idup(myproc()->cwd);
+
+  while((path = skipelem(path, name)) != 0){
+    ilock(ip);
+    if(ip->type != T_DIR){
+      iunlockput(ip);
+      return 0;
+    }
+    if(nameiparent && *path == '\0'){
+      // Stop one level early.
+      iunlock(ip);
+      return ip;
+    }
+    if((next = dirlookup(ip, name, 0)) == 0){
+      iunlockput(ip);
+      return 0;
+    }
+    iunlockput(ip);
+    ip = next;
+  }
+  if(nameiparent){
+    iput(ip);
+    return 0;
+  }
+  return ip;
+}
+```
+
+`namex` 的整體流程可能需要相當長的時間，因為它可能要進行多次硬碟操作，來讀取路徑中經過的那些目錄的 inode 和 directory block（如果這些資料尚未被緩存在 buffer cache 中）。 xv6 的設計十分謹慎：即使某個 kernel thread 呼叫 `namex` 時被卡在磁碟 I/O 上，其他 kernel thread 若要查找不同的路徑名稱時仍然可以繼續執行。 這是因為 `namex` 會針對路徑中的每個目錄分別上鎖，讓不同目錄的查找可以平行進行
+
+這樣的並行設計也帶來了一些挑戰。 舉例來說，當某個 kernel thread 正在查找某個路徑時，另一個 kernel thread 可能正在透過 unlink 操作來修改整個目錄樹。  這樣就會出現一種風險：查找的 thread 可能會處理到某個已經被刪除、其 block 又被重新分配給其他目錄或檔案的目錄
+
+xv6 採取了一些機制來避免這種競爭狀況。 舉例來說，在 `namex` 執行 `dirlookup` 時，查找的 thread 會先持有該目錄的鎖，並且 `dirlookup` 回傳的 inode 是透過 `iget` 取得的，而 `iget` 會增加該 inode 的引用計數。 只有在 `namex` 收到 inode 之後，才會釋放對該目錄的鎖。 這樣一來，即使之後有另一個 thread 把這個 inode 從目錄中 unlink 掉，由於 inode 的引用計數尚未歸零，xv6 仍然不會刪除該 inode
+
+另一種風險是死結（deadlock）。 例如，在查找 `"."`（代表目前目錄）時，`next` 會指向與 `ip` 相同的 inode。 若在還沒釋放 `ip` 的鎖之前就嘗試去鎖住 `next`，就會造成死結。 為了避免這種情況，`namex` 會先解鎖該目錄，再去對 `next` 上鎖。 這也再次說明了將 `iget` 與 `ilock` 拆開設計的重要性
