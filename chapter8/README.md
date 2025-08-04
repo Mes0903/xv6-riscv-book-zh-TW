@@ -713,3 +713,137 @@ iupdate(struct inode *ip)
   brelse(bp);
 }
 ```
+
+## 8.9 Code: Inodes
+
+當需要配置新 inode（例如建立檔案）時，xv6 會呼叫 `ialloc`（[kernel/fs.c:199](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L199)）。 `ialloc` 與 `balloc` 類似：它逐個掃描磁碟上的 inode block，尋找標記為空閒的 inode； 一旦找到，就把新的 type 寫回磁碟以宣告佔用，並呼叫 `iget`（[kernel/fs.c:213](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L213)）回傳 inode table 中的項目。 `ialloc` 能正常運作的關鍵是同時間只有一個行程持有 `bp` 指標，確保不會有另一行程同時看到該 inode 可用並試圖搶占它
+
+```c
+// Allocate an inode on device dev.
+// Mark it as allocated by  giving it type type.
+// Returns an unlocked but allocated and referenced inode,
+// or NULL if there is no free inode.
+struct inode*
+ialloc(uint dev, short type)
+{
+  int inum;
+  struct buf *bp;
+  struct dinode *dip;
+
+  for(inum = 1; inum < sb.ninodes; inum++){
+    bp = bread(dev, IBLOCK(inum, sb));
+    dip = (struct dinode*)bp->data + inum%IPB;
+    if(dip->type == 0){  // a free inode
+      memset(dip, 0, sizeof(*dip));
+      dip->type = type;
+      log_write(bp);   // mark it allocated on the disk
+      brelse(bp);
+      return iget(dev, inum);
+    }
+    brelse(bp);
+  }
+  printf("ialloc: no inodes\n");
+  return 0;
+}
+```
+
+`iget`（[kernel/fs.c:247](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L247)）會在 inode table 中搜尋符合指定裝置與 inode number 條件的活躍項目（`ip->ref > 0`）； 若找到，就回傳該 inode 的新參考（[kernel/fs.c:256-260](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L256-L260)）。 搜尋過程中它會將遇到的第一個空槽暫存起來（[kernel/fs.c:261-262](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L261-L262)），以便在沒找到的時候用來放入新的 table 項目
+
+```c
+// Find the inode with number inum on device dev
+// and return the in-memory copy. Does not lock
+// the inode and does not read it from disk.
+static struct inode*
+iget(uint dev, uint inum)
+{
+  struct inode *ip, *empty;
+
+  acquire(&itable.lock);
+
+  // Is the inode already in the table?
+  empty = 0;
+  for(ip = &itable.inode[0]; ip < &itable.inode[NINODE]; ip++){
+    if(ip->ref > 0 && ip->dev == dev && ip->inum == inum){
+      ip->ref++;
+      release(&itable.lock);
+      return ip;
+    }
+    if(empty == 0 && ip->ref == 0)    // Remember empty slot.
+      empty = ip;
+  }
+
+  // Recycle an inode entry.
+  if(empty == 0)
+    panic("iget: no inodes");
+
+  ip = empty;
+  ip->dev = dev;
+  ip->inum = inum;
+  ip->ref = 1;
+  ip->valid = 0;
+  release(&itable.lock);
+
+  return ip;
+}
+```
+
+在讀寫 inode 的中繼資料或內容前，程式必須先以 `ilock`（[kernel/fs.c:293](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L293)）函式將該 inode 上鎖，該函式內使用的是 sleep-lock。 在 `ilock` 獨占了該 inode 的存取權後，它就會在需要時從磁碟（實際上多半是 buffer cache）中讀取 inode。 `iunlock`（[kernel/fs.c:321](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L321)）則會釋放該 sleep-lock，喚醒等待此鎖的其他行程
+
+```c
+// Lock the given inode.
+// Reads the inode from disk if necessary.
+void
+ilock(struct inode *ip)
+{
+  struct buf *bp;
+  struct dinode *dip;
+
+  if(ip == 0 || ip->ref < 1)
+    panic("ilock");
+
+  acquiresleep(&ip->lock);
+
+  if(ip->valid == 0){
+    bp = bread(ip->dev, IBLOCK(ip->inum, sb));
+    dip = (struct dinode*)bp->data + ip->inum%IPB;
+    ip->type = dip->type;
+    ip->major = dip->major;
+    ip->minor = dip->minor;
+    ip->nlink = dip->nlink;
+    ip->size = dip->size;
+    memmove(ip->addrs, dip->addrs, sizeof(ip->addrs));
+    brelse(bp);
+    ip->valid = 1;
+    if(ip->type == 0)
+      panic("ilock: no type");
+  }
+}
+
+// Unlock the given inode.
+void
+iunlock(struct inode *ip)
+{
+  if(ip == 0 || !holdingsleep(&ip->lock) || ip->ref < 1)
+    panic("iunlock");
+
+  releasesleep(&ip->lock);
+}
+```
+
+`iput`（[kernel/fs.c:337](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L337)）會透過將參考計數減一（[kernel/fs.c:360](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L360)）來釋放指向某 inode 的 C 語言指標； 如果它是最後一個參考，則它在 inode table 中的槽位就會轉為空閒槽位，供其他 inode 使用
+
+如果 `iput` 發現某個 inode 已不再被任何 C 指標所參考，且也沒有任何硬連結指向它（也就是沒有出現在任何目錄中），那麼它會釋放該 inode 和其對應的 data block。 `iput` 會呼叫 `itrunc`，將檔案截短為 0 位元組來釋放資料區塊，接著將該 inode 的類型欄位設為 0（代表未分配），最後把 inode 寫回磁碟（[kernel/fs.c:342](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L342)）
+
+`iput` 釋放 inode 時的 locking 機制值得深入探討。 一種潛在風險是：其他執行緒可能正在 `ilock` 中等待這個 inode，例如想要讀取某個檔案或列出某個目錄，此時若 inode 已被釋放則會出現錯誤。 不過這種情況不會發生，因為如果某個 inode 沒有 link，且 `ip->ref` 是 1，那麼除了目前呼叫 `iput` 的執行緒外，系統中沒有其他地方會持有指向這個 inode 的指標
+
+另一種潛在風險是：釋放時同時有另一個執行緒呼叫 `ialloc`，並且選中了 `iput` 正在釋放的那個 inode。 不過這種情況只有在 `iupdate` 將 inode 的 type 寫成 0（代表未分配）後才會發生，因此這樣的競爭條件是良性的：因為分配 inode 的那個執行緒會在讀寫 inode 前先取得該 inode 的 sleep-lock，此時 `iput` 已經完成它的動作了
+
+`iput()` 可能會對硬碟進行寫入。 這代表，只要是會使用到檔案系統的 system call，就有可能對硬碟寫入，因為該 system call 有可能是系統中最後一個持有該檔案參照的地方。 即使像 `read()` 這種看起來是唯讀的呼叫，最終也可能呼叫到 `iput()`。 因此，只要是涉及檔案系統的 system call，即使表面上是唯讀的，也必須包在 transaction 裡
+
+`iput()` 和系統崩潰之間存在一個棘手的交互情況。 當某個檔案的 link count 降到 0 時，`iput()` 不會馬上把檔案截斷，因為可能還有某個 process 持有對該 inode 的記憶體參照：有某個 process 曾成功開啟該檔案並可能會再進行讀寫。 不過，如果在最後一個 process 關閉檔案描述符之前系統崩潰，那麼該檔案在硬碟上會仍被標記為 allocated，但已經沒有任何 directory entry 指向它了
+
+檔案系統處理這種情況的方法有兩種。 最簡單的方式是在重開機後進行 recovery 時，掃描整個檔案系統，找出那些被標記為 allocated 卻沒有任何 directory entry 指向它們的檔案。 只要找到這種檔案，就可以將其釋放
+
+第二種解法則不需掃描整個檔案系統。 在這個解法中，檔案系統會在磁碟上（例如記錄在 super block 中）紀錄那些 link count 為 0、但 reference count 尚未為 0 的 inode inumber。 當 reference count 最終也降到 0、檔案真正被刪除時，系統就從該列表中移除該 inode。 若發生崩潰，系統在 recovery 階段就可以釋放這個列表中遺留下來的檔案
+
+xv6 沒有實作上述任何一種解法，這代表即使某些 inode 已經不再被使用了，它們在硬碟上仍可能被標記為 allocated。 隨著時間推移，這可能導致 xv6 耗盡所有磁碟空間
