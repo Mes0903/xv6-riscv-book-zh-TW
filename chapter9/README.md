@@ -76,3 +76,21 @@ race 會破壞程式正確性的其中一個原因是，如果沒有使用 lock 
 xv6 中有些情況會發生這樣的情形：一個 CPU 或 thread 寫入某些資料，另一個 CPU 或 thread 則會去讀取這些資料，但卻沒有任何專門的 lock 來保護這些資料。 例如在 `fork` 中，parent process 會寫入 child 的 user memory page，而 child（可能在另一個 thread 或 CPU 上）會去讀取這些 page； 這些 page 沒有被明確地使用 lock 保護
 
 嚴格來說這不屬於 locking 問題，因為 child 是在 parent 完成寫入之後才開始執行的。 不過這會形成一個潛在的記憶體順序問題（詳見第六章），因為在沒有 memory barrier 的情況下，不能保證某個 CPU 會看到另一個 CPU 的寫入。 不過，由於 parent 會釋放 lock，而 child 在啟動時會取得 lock，因此 `acquire` 與 `release` 中隱含的 memory barrier 可保證 child 所在的 CPU 能夠看到 parent 所寫入的內容
+
+## 9.4 Parallelism
+
+Lock 的主要目的在於抑制並行性，以確保正確性。 然而，效能同樣也很重要，因此核心設計者往往必須思考如何在使用 lock 的同時，既能達到正確性，也能保有一定程度的平行性。 雖然 xv6 並不以高效能為設計目標，但仍值得分析哪些 xv6 的操作能夠並行執行，哪些操作會因 lock 發生衝突
+
+xv6 中的 pipe 是一個平行性設計的還不錯的例子。 每個 pipe 都有自己的 lock，因此不同的 process 可以在不同的 CPU 上並行地讀寫不同的 pipe。 然而，對於同一個 pipe，讀寫雙方仍必須互相等待對方釋放 lock； 他們無法同時對同一個 pipe 進行讀或寫。 此外，若讀取一個空的 pipe（或寫入一個已滿的 pipe），其也會被阻塞，不過這是因為同步邏輯的設計，而非 lock 本身所造成的
+
+context switch 是一個更複雜的例子。 如果兩個 kernel thread 各自在自己的 CPU 上執行，可以同時呼叫 `yield`、`sched` 和 `swtch`，而這些呼叫能夠並行執行。 每個 thread 都會持有一把鎖，但這些鎖彼此不同，因此他們不需互相等待。 不過一旦進入 `scheduler`，這兩個 CPU 就可能會在搜尋 `RUNNABLE` 的 process 時發生 lock 衝突。 換句話說，xv6 在 context switch 中可以從多核心受益，但實際上得到的效能提升可能不如理想
+
+另一個例子是不同 CPU 上的 process 同時呼叫 `fork`。 這些呼叫在某些地方需要互相等待，例如 `pid_lock`、`kmem.lock`，還有每個 process 自己的鎖，這些都會在搜尋 process table 中的 `UNUSED` process 時用到。 不過另一方面，這兩個 fork 操作也可以完全平行地進行 user memory page 的複製與 page table 的初始化
+
+上述各例中的 locking 設計，在某些情況下都犧牲了一定的平行效能。 不過每一種情況其實都可以透過更精密的設計來提升平行性。 至於是否值得這樣做，則取決於許多細節：像是相關操作的呼叫頻率、程式在持有受爭用鎖時花費的時間、有多少顆 CPU 同時在執行可能衝突的操作，以及是否有其他更嚴重的瓶頸存在。 要判斷某個 locking 設計是否會造成效能問題，或一個新設計是否真的更好，往往並不容易，因此通常需要透過實際負載下的效能測量來決定
+
+## 9.5 Exercises
+
+1. 修改 xv6 的 pipe 實作，使得同一個 pipe 上的讀與寫可以在不同的 CPU 上平行進行
+2. 修改 xv6 的 `scheduler()`，以減少當不同 CPU 同時搜尋可執行 process 時所產生的 lock contention
+3. 移除 xv6 中 `fork()` 實作裡的一部分序列化操作
