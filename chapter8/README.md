@@ -1201,10 +1201,53 @@ Unix 介面有一個很酷的設計是，它將系統中的大多數資源都表
 
 相對地，如果同一個 `struct file` 被多次引用，它可能會多次出現在同一個 process 的 file table 中，也可能出現在不同 process 的 file table 中。 這種情況可能發生在 process 使用 `open` 開啟檔案後，透過 `dup` 建立別名，或透過 `fork` 和子 process 共享檔案的情況。 系統會透過 reference count 來追蹤某個 open file 被引用的次數。 檔案可以被開啟為可讀、可寫，或兩者皆可，這些權限狀態由 `readable` 與 `writable` 欄位紀錄
 
+```c
+struct file {
+  enum { FD_NONE, FD_PIPE, FD_INODE, FD_DEVICE } type;
+  int ref; // reference count
+  char readable;
+  char writable;
+  struct pipe *pipe; // FD_PIPE
+  struct inode *ip;  // FD_INODE and FD_DEVICE
+  uint off;          // FD_INODE
+  short major;       // FD_DEVICE
+};
+```
+
 系統中所有開啟中的檔案都會集中管理在一個全域的檔案表 `ftable` 中。 這個 file table 提供幾個操作函式，包括分配一個新的檔案結構（`filealloc`）、建立重複引用（`filedup`）、釋放引用（`fileclose`），以及進行資料讀寫的函式（`fileread` 與 `filewrite`）
+
+```c
+struct {
+  struct spinlock lock;
+  struct file file[NFILE];
+} ftable;
+```
 
 前三個函式採用了我們已經熟悉的形式。 `filealloc`（[kernel/file.c:30](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/file.c#L30)）會掃描整個 file table，尋找一個尚未被引用的檔案（即 `f->ref == 0`），並回傳一個新的引用； `filedup`（[kernel/file.c:48](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/file.c#L48)）會增加 reference count； 而 `fileclose`（[kernel/file.c:60](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/file.c#L60)）則會減少 reference count。 當某個檔案的 reference count 變成 0 時，`fileclose` 會依據其類型（pipe 或 inode）釋放底層資源
 
 `filestat`、`fileread` 與 `filewrite` 這些函式實作了對檔案的 `stat`、`read` 與 `write` 操作。 `filestat`（[kernel/file.c:88](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/file.c#L88)）只能作用於 inode，並會呼叫 `stati`。 `fileread` 與 `filewrite` 則會先檢查該操作是否符合檔案的開啟模式，然後將呼叫轉發給對應的 pipe 或 inode 操作實作。 如果該 file 是 inode，`fileread` 與 `filewrite` 就會使用 I/O offset 作為此次操作的位移，並在操作完成後自動更新 offset（[kernel/file.c:122-123](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/file.c#L122-L123), [kernel/file.c:153-154](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/file.c#L153-L154)）。 而 pipe 則沒有 offset 的概念
 
-請注意，`inode` 函式要求呼叫者自己負責加鎖（[kernel/file.c:94-96](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/file.c#L94-L96), [kernel/file.c:121-124](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/file.c#L121-L123), [kernel/file.c:163-166](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/file.c#L163-L166)）。 這個 inode 加鎖的設計還帶來一個額外好處：它能確保讀寫時的 offset 更新具有原子性，也就是說同時多個 process 寫入同一檔案時，不會互相覆蓋對方的資料； 不過寫入的內容可能會交錯
+請注意，inode 函式要求呼叫者自己負責加鎖（[kernel/file.c:94-96](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/file.c#L94-L96), [kernel/file.c:121-124](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/file.c#L121-L123), [kernel/file.c:163-166](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/file.c#L163-L166)）。 這個 inode 加鎖的設計還帶來一個額外好處：它能確保讀寫時的 offset 更新具有原子性，也就是說同時多個 process 寫入同一檔案時，不會互相覆蓋對方的資料； 不過寫入的內容可能會交錯
+
+## 8.14 Code: System calls
+
+借助底層提供的那些函式，大多數 system call 的實作都非常簡單（[kernel/sysfile.c](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/sysfile.c)）。 不過有幾個 system call 值得我們深入探討
+
+`sys_link` 和 `sys_unlink` 這兩個函式會修改目錄，也就是建立或移除 inode 的參照，這兩個函式是「使用 transaction 的好例子」。 `sys_link`（[kernel/sysfile.c:124](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/sysfile.c#L124)）首先會抓取兩個字串參數 `old` 和 `new`（[kernel/sysfile.c:129](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/sysfile.c#L129)）。 假設 `old` 存在且不是目錄（[kernel/sysfile.c:133-136](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/sysfile.c#L133-L136)），`sys_link` 就會把它的 `ip->nlink` 參照計數加一
+
+接著 `sys_link` 會呼叫 `nameiparent` 找出 `new` 的父目錄與最後一段名稱（[kernel/sysfile.c:149](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/sysfile.c#L149)），然後在該目錄中建立一個新的 directory entry 指向 `old` 的 `inode`（[kernel/sysfile.c:152](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/sysfile.c#L152)）。 這個新建立的父目錄必須存在，且必須和 `old` 的 inode 在同一個裝置上，因為 inode number 只有在單一磁碟上才具有唯一性。如果出現這類錯誤，`sys_link` 必須回頭把 `ip->nlink` 減回來
+
+使用 transaction 會讓實作變得更簡單，因為它牽涉到更新多個硬碟區塊（disk block），但我們不需要擔心這些操作的執行順序。 其要嘛所有操作都成功，要嘛全都不執行。 例如，如果沒有使用 transaction，就先更新了 `ip->nlink` 卻還沒建立新的 link，這會讓檔案系統短暫進入不一致狀態，若此時系統當機，可能會造成更嚴重的錯誤。 而有了 transaction，就不需要擔心這些問題
+
+`sys_link` 是為已存在的 inode 建立一個新名稱，而 `create`（[kernel/sysfile.c:246](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/sysfile.c#L246)）則是為一個新的 inode 建立新名稱。 `create` 是三個建立檔案相關 system call 的泛化版本：`open` 搭配 `O_CREATE` 旗標會建立一個新的普通檔案、`mkdir` 建立新目錄、`mkdev` 則建立設備檔案
+
+`create` 的起始步驟與 `sys_link` 相同，會先呼叫 `nameiparent` 找到父目錄 inode。 接著呼叫 `dirlookup` 確認該名稱是否已存在（[kernel/sysfile.c:256](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/sysfile.c#L256)）。 若名稱已存在，`create` 的行為會根據所使用的 system call 而異：`open` 的語意和 `mkdir`、`mkdev` 不同。 如果 `create` 是代表 `open` 呼叫（`type == T_FILE`），而該名稱對應的是普通檔案，則 `open` 視此為成功，`create` 也會視為成功（[kernel/sysfile.c:260](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/sysfile.c#L260)）； 否則會視為錯誤（[kernel/sysfile.c:261-262](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/sysfile.c#L261-L262)）
+
+若名稱尚未存在，`create` 就會使用 `ialloc`（[kernel/sysfile.c:265](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/sysfile.c#L265)）配置一個新的 inode。 若這個新的 inode 是一個目錄，`create` 會初始化它的 `.` 與 `..` 項目。 當這些資料都妥善初始化後，`create` 才會將該 inode link 到父目錄中（[kernel/sysfile.c:278](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/sysfile.c#L278)）。 `create` 與 `sys_link` 一樣，在過程中會同時持有兩個 inode 的鎖：`ip` 與 `dp`。 但不會有 deadlock 的風險，因為 `ip` 是剛分配出來的新 inode，系統中不會有其他 process 已經先鎖住它並再去鎖 `dp`
+
+透過 `create`，可以很容易地實作 `sys_open`、`sys_mkdir` 和 `sys_mknod`。 其中 `sys_open`（[kernel/sysfile.c:305](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/sysfile.c#L305)）最為複雜，因為「建立新檔案」只是它眾多功能中的一部分。 當 `open` 搭配 `O_CREATE` 旗標時，它會呼叫 `create`（[kernel/sysfile.c:320](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/sysfile.c#L320)）； 否則就會呼叫 `namei`（[kernel/sysfile.c:326](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/sysfile.c#L326)）
+
+`create` 會回傳一個已加鎖的 inode，但 `namei` 不會，因此 `sys_open` 必須自行將該 inode 上鎖。 這裡也剛好提供了一個機會來檢查是否對目錄做了不合法的開啟方式（例如以寫入模式開啟目錄）。 在成功取得 inode 之後，`sys_open` 會分配一個 file 結構與一個 file descriptor（[kernel/sysfile.c:344](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/sysfile.c#L344)），並填入 file 結構內容（[kernel/sysfile.c:356-
+361](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/sysfile.c#L356-L361)）。 需要注意的是，此時該 file 尚未出現在其他 process 的 table 中，因此其他 process 無法存取這個尚未完全初始化的檔案
+
+在第七章，我們在尚未介紹檔案系統前就已經看過 pipe 的實作。 而 `sys_pipe` 則將那套 pipe 實作與檔案系統結合，提供一種建立 pipe 配對（pipe pair）的方法。 它的參數是一個指向兩個整數的記憶體空間的指標，該函式會在那裡寫入兩個新的 file descriptor。 接著，它會配置一個新的 pipe，並將兩個 file descriptor 安裝進 process 的 file descriptor table 中
