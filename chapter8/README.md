@@ -847,3 +847,191 @@ iunlock(struct inode *ip)
 第二種解法則不需掃描整個檔案系統。 在這個解法中，檔案系統會在磁碟上（例如記錄在 super block 中）紀錄那些 link count 為 0、但 reference count 尚未為 0 的 inode inumber。 當 reference count 最終也降到 0、檔案真正被刪除時，系統就從該列表中移除該 inode。 若發生崩潰，系統在 recovery 階段就可以釋放這個列表中遺留下來的檔案
 
 xv6 沒有實作上述任何一種解法，這代表即使某些 inode 已經不再被使用了，它們在硬碟上仍可能被標記為 allocated。 隨著時間推移，這可能導致 xv6 耗盡所有磁碟空間
+
+## 8.10 Code: Inode content
+
+磁碟上的 inode 結構為 `struct dinode`，其中包含了一個大小欄位與一個 block 編號的陣列（見圖 8.3）。 inode 的資料儲存在 `dinode` 內 `addrs` 陣列所列出的那些 block 中。 這個陣列的前 `NDIRECT` 個項目對應的 block 被稱為 direct blocks； 而接下來的 `NINDIRECT` 個 block 則不直接列在 inode 中，而是儲存在一個稱為 indirect block 的 data block 裡
+
+![（Figure 8.3: The representation of a file on disk.）](image/inode.png)
+
+indirect block 的位址被放在 addrs 陣列的最後一個項目中。 也就是說，一個檔案的前 12 KB（`NDIRECT × BSIZE`）可以直接從 inode 裡所列出的 block 取得，而後續的 256 KB（`NINDIRECT × BSIZE`）則必須透過查找 indirect block 才能取得。 這樣的設計對磁碟比較友善，但對於使用者程式來說處理起來就較為複雜
+
+`bmap` 函式負責處理這種表示法的細節，使得像 `readi` 和 `writei` 這類較高階的函式無須處理這些複雜性。 `bmap` 會回傳 inode `ip` 的第 `bn` 個 data block 對應的磁碟 block 編號。 如果該 block 尚未配置，`bmap` 就會配置一個新的 block
+
+`bmap` 函式（[kernel/fs.c:383](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L383)）首先會處理前 `NDIRECT` 個 data block，因為它直接列在 inode 裡（[kernel/fs.c:388-396](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L388-L396)）所以處理起來比較簡單。 接下來的 `NINDIRECT` 個 data block 則列在 indirect block 中，其位址存放於 `ip->addrs[NDIRECT]`。 `bmap` 會先從磁碟讀取這個 indirect block（[kernel/fs.c:407](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L407)），然後從這個 block 的適當位置讀出正確的 block 編號（[kernel/fs.c:408](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L408)）。 如果傳入的區塊編號超過 `NDIRECT + NINDIRECT`，`bmap` 會觸發 panic； `writei` 裡會有邏輯先進行檢查，以避免這種情況發生（[kernel/fs.c:513](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L513)）
+
+```c
+// Inode content
+//
+// The content (data) associated with each inode is stored
+// in blocks on the disk. The first NDIRECT block numbers
+// are listed in ip->addrs[].  The next NINDIRECT blocks are
+// listed in block ip->addrs[NDIRECT].
+
+
+// Return the disk block address of the nth block in inode ip.
+// If there is no such block, bmap allocates one.
+// returns 0 if out of disk space.
+static uint
+bmap(struct inode *ip, uint bn)
+{
+  uint addr, *a;
+  struct buf *bp;
+
+  if(bn < NDIRECT){
+    if((addr = ip->addrs[bn]) == 0){
+      addr = balloc(ip->dev);
+      if(addr == 0)
+        return 0;
+      ip->addrs[bn] = addr;
+    }
+    return addr;
+  }
+  bn -= NDIRECT;
+
+  if(bn < NINDIRECT){
+    // Load indirect block, allocating if necessary.
+    if((addr = ip->addrs[NDIRECT]) == 0){
+      addr = balloc(ip->dev);
+      if(addr == 0)
+        return 0;
+      ip->addrs[NDIRECT] = addr;
+    }
+    bp = bread(ip->dev, addr);
+    a = (uint*)bp->data;
+    if((addr = a[bn]) == 0){
+      addr = balloc(ip->dev);
+      if(addr){
+        a[bn] = addr;
+        log_write(bp);
+      }
+    }
+    brelse(bp);
+    return addr;
+  }
+
+  panic("bmap: out of range");
+}
+```
+
+`bmap` 會在需要時動態配置區塊。 當 `ip->addrs[]` 或 indirect block 中的某一個項目為 0 時，表示對應的 data block 尚未配置。 一旦 `bmap` 遇到這樣的情況，就會即時分配一個新的 data block，並將其 block 編號填入原本為 0 的位置（[kernel/fs.c:389-390](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L513) & [kernel/fs.c:401-402](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L401-L402)）
+
+`itrunc` 會釋放一個檔案所使用的所有 data block，並將 inode 的大小欄位設為 0。 `itrunc`（[kernel/fs.c:426](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L426)）會先釋放所有 direct block（[kernel/fs.c:432-437](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L432-L437)），接著釋放 indirect block 中列出的所有 data block（[kernel/fs.c:442-445](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L442-L445)），最後再釋放那個用來記錄間接位址的 indirect block 本身（[kernel/fs.c:447-448](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L447-L448)）
+
+```c
+// Truncate inode (discard contents).
+// Caller must hold ip->lock.
+void
+itrunc(struct inode *ip)
+{
+  int i, j;
+  struct buf *bp;
+  uint *a;
+
+  for(i = 0; i < NDIRECT; i++){
+    if(ip->addrs[i]){
+      bfree(ip->dev, ip->addrs[i]);
+      ip->addrs[i] = 0;
+    }
+  }
+
+  if(ip->addrs[NDIRECT]){
+    bp = bread(ip->dev, ip->addrs[NDIRECT]);
+    a = (uint*)bp->data;
+    for(j = 0; j < NINDIRECT; j++){
+      if(a[j])
+        bfree(ip->dev, a[j]);
+    }
+    brelse(bp);
+    bfree(ip->dev, ip->addrs[NDIRECT]);
+    ip->addrs[NDIRECT] = 0;
+  }
+
+  ip->size = 0;
+  iupdate(ip);
+}
+```
+
+`bmap` 讓 `readi` 和 `writei` 能夠輕鬆地存取 inode 的資料。 `readi`（[kernel/fs.c:472](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L472)）一開始會先確認傳入的 offset 和資料長度是否有超過檔案結尾。 若從檔案末尾之後開始讀取，會直接回傳錯誤（[kernel/fs.c:477-478](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L477-L478)）； 若讀取範圍涵蓋到檔案尾端，則會只回傳有效資料長度內的部分（[kernel/fs.c:479-480](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L479-L480)）。 接著進入主迴圈，每次處理一個 data block，並從 buffer 複製資料到 `dst`（[kernel/fs.c:482-494](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L482-L494)）
+
+```c
+// Read data from inode.
+// Caller must hold ip->lock.
+// If user_dst==1, then dst is a user virtual address;
+// otherwise, dst is a kernel address.
+int
+readi(struct inode *ip, int user_dst, uint64 dst, uint off, uint n)
+{
+  uint tot, m;
+  struct buf *bp;
+
+  if(off > ip->size || off + n < off)
+    return 0;
+  if(off + n > ip->size)
+    n = ip->size - off;
+
+  for(tot=0; tot<n; tot+=m, off+=m, dst+=m){
+    uint addr = bmap(ip, off/BSIZE);
+    if(addr == 0)
+      break;
+    bp = bread(ip->dev, addr);
+    m = min(n - tot, BSIZE - off%BSIZE);
+    if(either_copyout(user_dst, dst, bp->data + (off % BSIZE), m) == -1) {
+      brelse(bp);
+      tot = -1;
+      break;
+    }
+    brelse(bp);
+  }
+  return tot;
+}
+```
+
+`writei`（[kernel/fs.c:506](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L506)）在邏輯上與 `readi` 幾乎相同，但有三個差異：若寫入動作發生在檔案尾端或越過尾端，則會使檔案大小成長，最多可達最大檔案限制（[kernel/fs.c:513-514](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L513-L514)）； 寫入時是將資料從使用者空間複製到 buffer（[kernel/fs.c:522](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L522)）； 若寫入後檔案大小變大，則 `writei` 也會更新 inode 的檔案大小欄位（[kernel/fs.c:530-531](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L530-L531)）
+
+```c
+// Write data to inode.
+// Caller must hold ip->lock.
+// If user_src==1, then src is a user virtual address;
+// otherwise, src is a kernel address.
+// Returns the number of bytes successfully written.
+// If the return value is less than the requested n,
+// there was an error of some kind.
+int
+writei(struct inode *ip, int user_src, uint64 src, uint off, uint n)
+{
+  uint tot, m;
+  struct buf *bp;
+
+  if(off > ip->size || off + n < off)
+    return -1;
+  if(off + n > MAXFILE*BSIZE)
+    return -1;
+
+  for(tot=0; tot<n; tot+=m, off+=m, src+=m){
+    uint addr = bmap(ip, off/BSIZE);
+    if(addr == 0)
+      break;
+    bp = bread(ip->dev, addr);
+    m = min(n - tot, BSIZE - off%BSIZE);
+    if(either_copyin(bp->data + (off % BSIZE), user_src, src, m) == -1) {
+      brelse(bp);
+      break;
+    }
+    log_write(bp);
+    brelse(bp);
+  }
+
+  if(off > ip->size)
+    ip->size = off;
+
+  // write the i-node back to disk even if the size didn't change
+  // because the loop above might have called bmap() and added a new
+  // block to ip->addrs[].
+  iupdate(ip);
+
+  return tot;
+}
+```
+
+`stati` 函式（[kernel/fs.c:458](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L458)）會將 inode 的 metadata 複製到 `stat` 結構中，該結構會透過 `stat` 系統呼叫暴露給使用者程式
