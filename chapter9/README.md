@@ -68,3 +68,11 @@ race 會破壞程式正確性的其中一個原因是，如果沒有使用 lock 
 一個新 process 的 memory 擁有權的轉移過程相當複雜：一開始由 parent 在 `fork` 中配置與操作，然後由 child 使用，最後當 child 結束時，又回到 parent 手上，並交由 `kfree` 釋放。 這裡可學到兩點：第一，某個資料物件在生命週期的不同階段，可能會以不同方式被保護； 第二，這種保護有時可能是隱含的結構性設計，而非顯式地使用 lock
 
 最後一個類似 lock 的例子是：在呼叫 `mycpu()`（[kernel/proc.c:83](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/proc.c#L83)）時需要關閉中斷。 關閉中斷可以讓該段程式在執行期間，不會被 timer interrupt 打斷，進而強制發生 context switch，將 process 切換到另一顆 CPU
+
+## 9.3 No locks at all
+
+在 xv6 中，有些地方會共用可變資料而完全不使用 lock。 其中一個例子是 spinlock 的實作，但你也可以認為 RISC-V 的 atomic 指令本質上是由硬體提供的 lock。 另一個例子是 `main.c` 中的 `started` 變數（[kernel/main.c:7](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/main.c#L7)），用來在 CPU 0 完成 xv6 的初始化前，阻止其他 CPU 開始執行； 其中的 `volatile` 關鍵字可以確保編譯器會確實產生 load 與 store 指令
+
+xv6 中有些情況會發生這樣的情形：一個 CPU 或 thread 寫入某些資料，另一個 CPU 或 thread 則會去讀取這些資料，但卻沒有任何專門的 lock 來保護這些資料。 例如在 `fork` 中，parent process 會寫入 child 的 user memory page，而 child（可能在另一個 thread 或 CPU 上）會去讀取這些 page； 這些 page 沒有被明確地使用 lock 保護
+
+嚴格來說這不屬於 locking 問題，因為 child 是在 parent 完成寫入之後才開始執行的。 不過這會形成一個潛在的記憶體順序問題（詳見第六章），因為在沒有 memory barrier 的情況下，不能保證某個 CPU 會看到另一個 CPU 的寫入。 不過，由於 parent 會釋放 lock，而 child 在啟動時會取得 lock，因此 `acquire` 與 `release` 中隱含的 memory barrier 可保證 child 所在的 CPU 能夠看到 parent 所寫入的內容
