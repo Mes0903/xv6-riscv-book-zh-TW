@@ -1192,3 +1192,19 @@ namex(char *path, int nameiparent, char *name)
 xv6 採取了一些機制來避免這種競爭狀況。 舉例來說，在 `namex` 執行 `dirlookup` 時，查找的 thread 會先持有該目錄的鎖，並且 `dirlookup` 回傳的 inode 是透過 `iget` 取得的，而 `iget` 會增加該 inode 的引用計數。 只有在 `namex` 收到 inode 之後，才會釋放對該目錄的鎖。 這樣一來，即使之後有另一個 thread 把這個 inode 從目錄中 unlink 掉，由於 inode 的引用計數尚未歸零，xv6 仍然不會刪除該 inode
 
 另一種風險是死結（deadlock）。 例如，在查找 `"."`（代表目前目錄）時，`next` 會指向與 `ip` 相同的 inode。 若在還沒釋放 `ip` 的鎖之前就嘗試去鎖住 `next`，就會造成死結。 為了避免這種情況，`namex` 會先解鎖該目錄，再去對 `next` 上鎖。 這也再次說明了將 `iget` 與 `ilock` 拆開設計的重要性
+
+## 8.13 File descriptor layer
+
+Unix 介面有一個很酷的設計是，它將系統中的大多數資源都表示為檔案，包括像是主控台（console）、pipe，以及一般的實體檔案等。 而實現這種一致性設計的就是「file descriptor layer」
+
+如同在第一章所介紹的，xv6 為每個 process 提供了自己的「已開啟檔案表（open file table）」，或稱 file descriptor 表。 每個被開啟的檔案都會對應到一個 `struct file`（[kernel/file.h:1](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/file.h#L1)），這個結構會包裝住一個 inode 或一個 pipe，加上一個 I/O offset。 每次呼叫 `open` 都會建立一個新的 open file（也就是一個新的 `struct file` 結構）； 即便多個 process 開啟同一個檔案，它們各自的 `struct file` 也會擁有不同的 I/O offset
+
+相對地，如果同一個 `struct file` 被多次引用，它可能會多次出現在同一個 process 的 file table 中，也可能出現在不同 process 的 file table 中。 這種情況可能發生在 process 使用 `open` 開啟檔案後，透過 `dup` 建立別名，或透過 `fork` 和子 process 共享檔案的情況。 系統會透過 reference count 來追蹤某個 open file 被引用的次數。 檔案可以被開啟為可讀、可寫，或兩者皆可，這些權限狀態由 `readable` 與 `writable` 欄位紀錄
+
+系統中所有開啟中的檔案都會集中管理在一個全域的檔案表 `ftable` 中。 這個 file table 提供幾個操作函式，包括分配一個新的檔案結構（`filealloc`）、建立重複引用（`filedup`）、釋放引用（`fileclose`），以及進行資料讀寫的函式（`fileread` 與 `filewrite`）
+
+前三個函式採用了我們已經熟悉的形式。 `filealloc`（[kernel/file.c:30](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/file.c#L30)）會掃描整個 file table，尋找一個尚未被引用的檔案（即 `f->ref == 0`），並回傳一個新的引用； `filedup`（[kernel/file.c:48](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/file.c#L48)）會增加 reference count； 而 `fileclose`（[kernel/file.c:60](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/file.c#L60)）則會減少 reference count。 當某個檔案的 reference count 變成 0 時，`fileclose` 會依據其類型（pipe 或 inode）釋放底層資源
+
+`filestat`、`fileread` 與 `filewrite` 這些函式實作了對檔案的 `stat`、`read` 與 `write` 操作。 `filestat`（[kernel/file.c:88](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/file.c#L88)）只能作用於 inode，並會呼叫 `stati`。 `fileread` 與 `filewrite` 則會先檢查該操作是否符合檔案的開啟模式，然後將呼叫轉發給對應的 pipe 或 inode 操作實作。 如果該 file 是 inode，`fileread` 與 `filewrite` 就會使用 I/O offset 作為此次操作的位移，並在操作完成後自動更新 offset（[kernel/file.c:122-123](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/file.c#L122-L123), [kernel/file.c:153-154](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/file.c#L153-L154)）。 而 pipe 則沒有 offset 的概念
+
+請注意，`inode` 函式要求呼叫者自己負責加鎖（[kernel/file.c:94-96](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/file.c#L94-L96), [kernel/file.c:121-124](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/file.c#L121-L123), [kernel/file.c:163-166](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/file.c#L163-L166)）。 這個 inode 加鎖的設計還帶來一個額外好處：它能確保讀寫時的 offset 更新具有原子性，也就是說同時多個 process 寫入同一檔案時，不會互相覆蓋對方的資料； 不過寫入的內容可能會交錯
