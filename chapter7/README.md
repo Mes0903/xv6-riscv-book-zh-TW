@@ -35,7 +35,7 @@ xv6 的 multiplexing 機制會在兩種情況下讓某個 CPU 從一個 process 
 
 xv6 為 scheduler 使用了獨立的 thread（各自擁有暫存器與 stack 的保存空間），因為讓 scheduler 在任意 process 的 kernel stack 上執行並不安全：其他 CPU 可能會在這段期間喚醒該 process 並開始執行，若兩個 CPU 共用同一個 stack，會造成災難性的後果。 為了處理多顆 CPU 同時執行、並有 process 要放棄 CPU 的情況，xv6 為每個 CPU 配置了獨立的 scheduler thread。 在這一節中，我們將會詳細探討 kernel thread 與 scheduler thread 之間切換的具體實作方式
 
-![Figure 7.1: Switching from one user process to another. In this example, xv6 runs with one CPU (and thus one scheduler thread).](image/switch.png)
+![（Figure 7.1: Switching from one user process to another. In this example, xv6 runs with one CPU (and thus one scheduler thread).）](image/switch.png)
 
 從一個 thread 切換到另一個 thread 的過程，需要將舊 thread 的 CPU 暫存器儲存下來，並還原新 thread 先前儲存的那些暫存器。 由於 stack pointer 和 program counter 都會被儲存與還原，這也表示 CPU 將會切換至新的 stack，並且執行新的程式碼
 

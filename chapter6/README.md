@@ -29,7 +29,7 @@ kernel 的記憶體分配器維護一個 linked list：`kalloc()` 會從 free li
 
 圖 6.1 更詳細地說明了這個情境：free page 的 linked list 位於兩個 CPU 共享的記憶體中，而它們使用 load 與 store 指令來操作這個 list（實際上處理器內會有 cache，但概念上多處理器系統的行為就像是共享單一記憶體一樣）
 
-![Figure 6.1: Simplified SMP architecture](image/smp.png)
+![（Figure 6.1: Simplified SMP architecture）](image/smp.png)
 
 如果沒有並行的請求，則 list 的 push 實作可能如下：
 
@@ -55,7 +55,7 @@ push(int data)
 
 這段實作在單獨執行時是正確的，然而當多個實例同時執行時，這段程式就不正確了。 如果兩個 CPU 同時執行 `push`，那麼它們都可能如圖 6.1 所示地執行 `l->next = list`，這會導致在它們都還沒來得及執行 `list = l` 之前，就出現如圖 6.2 所示的錯誤結果：兩個 list 節點的 `next` 都指向原本的 list，而當這兩次 `list = l` 被執行時，第二次的賦值會覆蓋第一次的結果，導致第一次的節點遺失
 
-![Figure 6.2: Example race](image/race.png)
+![（Figure 6.2: Example race）](image/race.png)
 
 在 `list = l` 發生的資料遺失就是一個競爭（race）的例子。 race 是指某個記憶體位置被多個執行緒或 CPU 同時存取，而且其至少有一個是寫入操作。 race 通常代表有 bug，要麼是更新被遺失（如果是多次寫入），要麼是讀到尚未完整更新的資料結構。 race 的結果會受到編譯器產生的機器碼、兩個 CPU 執行的時序，以及記憶體系統安排這些操作順序的方式影響，因此 race 導致的錯誤常常很難重現與除錯。 舉例來說，在 debug `push` 時加上 print statement 可能就改變了執行時序，使 race 的情況消失
 
