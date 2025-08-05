@@ -21,6 +21,10 @@ star: true
 
 原文用於 MIT 6.828 及 6.1810 的課堂教學中，共有 1~10 章，最後一章為非常短的 Summary 所以我就沒翻了
 
+最後是 Blog 上的文章連結，畢竟是以放在 Blog 上為前提寫的，因此也會比較好閱讀
+
+- [blog link](https://mes0903.github.io/OS/xv6-riscv-book-zh-TW/)
+
 ## LICENSE
 
 LICENSE 遵循原 repo 使用 MIT：
