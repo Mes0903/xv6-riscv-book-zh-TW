@@ -19,7 +19,7 @@ driver 是作業系統中負責管理特定裝置的程式碼：它會設定裝�
 
 ## 5.1 Code: Console input
 
-console driver（[kernel/console.c](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/console.c)）是一個簡單展示 driver 結構的範例，其透過接在 RISC-V 上的 UART 序列埠硬體來接收人類輸入的字元。 console driver 會一次累積一整行輸入，並處理像 backspace 和 control-u 這類的特殊字元。 像 shell 這樣的 user process，會透過 `read` system call 從 console 讀取一整行的輸入。 當你在 QEMU 中對 xv6 輸入時，你的按鍵會經由 QEMU 模擬的 UART 硬體傳送給 xv6
+console driver（[kernel/console.c](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/console.c)）是一個簡單展示 driver 結構的範例，其透過接在 RISC-V 上的 UART 序列埠硬體來接收人類輸入的字元。 console driver 會一次累積一整行輸入，並處理像 backspace 和 control-u 這類的特殊字元。 像 shell 這樣的 user process，會透過 `read` 系統呼叫從 console 讀取一整行的輸入。 當你在 QEMU 中對 xv6 輸入時，你的按鍵會經由 QEMU 模擬的 UART 硬體傳送給 xv6
 
 這個 driver 所操作的 UART 硬體，是由 QEMU 模擬出來的 16550 晶片<sup>[[1]](#1)</sup>。 在真實的電腦上，16550 晶片通常用來控制 RS232 序列連線，連接到終端機或另一台電腦。 而在執行 QEMU 時，它則連接到你的鍵盤與顯示器
 
@@ -74,11 +74,11 @@ consoleinit(void)
 
 `uartintr`（[kernel/uart.c:177](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/uart.c#L177)）會從 UART 硬體中讀取所有尚未處理的輸入字元，並將這些字元交給 `consoleintr`（[kernel/console.c:136](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/uart.c#L177)）； 它本身不會等待更多輸入，因為未來有新輸入時還會再次觸發新的中斷。 `consoleintr` 的工作是將這些輸入字元累積到 `cons.buf` 中，直到整行輸入完成為止。 `consoleintr` 會特別處理 backspace 與其他一些特殊字元
 
-當輸入遇到 newline 時，`consoleintr` 會喚醒等待中的 `consoleread`（如果有的話）。 一旦被喚醒，`consoleread` 就會發現 `cons.buf` 中已經有一整行輸入，接著它會把這行資料複製到 user space，然後透過 system call 的機制將控制權返回給 user space
+當輸入遇到 newline 時，`consoleintr` 會喚醒等待中的 `consoleread`（如果有的話）。 一旦被喚醒，`consoleread` 就會發現 `cons.buf` 中已經有一整行輸入，接著它會把這行資料複製到 user space，然後透過系統呼叫的機制將控制權返回給 user space
 
 ## 5.2 Code: Console output
 
-對已連接到 console 的 file descriptor 所做的 `write` system call，最終會到達 `uartputc`（[kernel/uart.c:87](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/uart.c#L87)）。 driver 維護了一個輸出緩衝區（`uart_tx_buf`），使得執行寫入的 process 不需要等待 UART 傳送完畢； 相反地，`uartputc` 會將每個字元加入緩衝區，然後呼叫 `uartstart` 來啟動 UART 的傳送（如果尚未開始的話），接著就直接返回。 只有當緩衝區滿了的情況下 `uartputc` 才會停下來等待
+對已連接到 console 的 file descriptor 所做的 `write` 系統呼叫，最終會到達 `uartputc`（[kernel/uart.c:87](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/uart.c#L87)）。 driver 維護了一個輸出緩衝區（`uart_tx_buf`），使得執行寫入的 process 不需要等待 UART 傳送完畢； 相反地，`uartputc` 會將每個字元加入緩衝區，然後呼叫 `uartstart` 來啟動 UART 的傳送（如果尚未開始的話），接著就直接返回。 只有當緩衝區滿了的情況下 `uartputc` 才會停下來等待
 
 每當 UART 傳送完一個 byte，它就會產生一個中斷。 `uartintr` 會呼叫 `uartstart`，這個函式會檢查 UART 是否真的完成傳送，然後把下一個緩衝區中的輸出字元交給 UART 傳送。 因此，如果某個 process 一次寫入多個 byte 到 console，通常第一個 byte 是由 `uartputc` 呼叫 `uartstart` 傳送出去的，其餘在緩衝區裡的 byte 則會由 `uartintr` 在每次中斷到來時持續呼叫 `uartstart` 傳送出去
 

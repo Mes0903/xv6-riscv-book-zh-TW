@@ -23,7 +23,7 @@ category:
 
 一般來說，取得 lock 的函式會在同一個函式中釋放該 lock。 但更精確的說法是：lock 會在一段需要表現為原子操作的序列開始時被取得，而在這段序列結束時釋放。 如果這段序列的開始與結束發生在不同的函式、不同的 thread，甚至不同的 CPU 上，那麼 lock 的取得與釋放也必須跨越這些邊界。 lock 的目的是阻止其他使用者介入，而不是將資料綁定在某個特定 agent 上
 
-一個例子是 `yield` 中的 `acquire`（[kernel/proc.c:512](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/proc.c#L512)），其對應的釋放發生在 scheduler thread，而非原本呼叫者所在的 process。 另一個例子是 `ilock` 中的 `acquiresleep`（[kernel/fs.c:293](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L293)），該程式在讀取磁碟時可能會 sleep，而醒來時可能已經在不同的 CPU 上了，因此 `acquire` 與 `release` 可能會發生於不同 CPU
+一個例子是 `yield` 中的 `acquire`（[kernel/proc.c:512](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/proc.c#L512)），其對應的釋放發生在 scheduler thread，而非原本呼叫者所在的 process。 另一個例子是 `ilock` 中的 `acquiresleep`（[kernel/fs.c:293](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L293)），該程式在讀取硬碟時可能會 sleep，而醒來時可能已經在不同的 CPU 上了，因此 `acquire` 與 `release` 可能會發生於不同 CPU
 
 釋放內部含有 lock 的物件的操作會非常敏感，因為單純持有該 lock 並不足以保證釋放行為是正確的。 典型的問題是：當某個 thread 正在 `acquire` 該 lock 等待使用這個物件時，若此時另一個 thread 將該物件釋放，那麼這樣也會隱含地釋放掉 lock 本身，導致正在等待的 thread 發生錯誤
 
@@ -57,11 +57,11 @@ race 會破壞程式正確性的其中一個原因是，如果沒有使用 lock 
 
 ## 9.2 Lock-like patterns
 
-在 xv6 的許多地方，系統會以 reference count 或 flag 的方式，模擬類似 lock 的行為，用來表示某個物件目前處於已配置（allocated）狀態，因此不應該被釋放或重新使用。 像是 process 的 `p->state` 就具有這種效果，而 `file`、`inode` 與 `buf` 結構中的 reference count 也是如此。 雖然這些 flag 或 reference count 本身都會受到 lock 保護，但真正防止物件被過早釋放的，其實是這些 reference count 本身
+在 xv6 的許多地方，系統會以引用計數或 flag 的方式，模擬類似 lock 的行為，用來表示某個物件目前處於已配置（allocated）狀態，因此不應該被釋放或重新使用。 像是 process 的 `p->state` 就具有這種效果，而 `file`、`inode` 與 `buf` 結構中的引用計數也是如此。 雖然這些 flag 或引用計數本身都會受到 lock 保護，但真正防止物件被過早釋放的，其實是這些引用計數本身
 
-檔案系統會使用 `struct inode` 的 reference count 作為一種共享 lock，這樣可以讓多個 process 同時持有，以避免那些使用一般 lock 可能發生的 deadlock。 例如，`namex` 中的迴圈（[kernel/fs.c:652](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L652)）會依序對每個 path component 所對應的目錄加鎖
+檔案系統會使用 `struct inode` 的引用計數作為一種共享 lock，這樣可以讓多個 process 同時持有，以避免那些使用一般 lock 可能發生的 deadlock。 例如，`namex` 中的迴圈（[kernel/fs.c:652](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/fs.c#L652)）會依序對每個 path component 所對應的目錄加鎖
 
-而 `namex` 在每次迴圈結束時必須釋放該鎖，否則若 path 中包含 `.`（例如 `a/./b`），就可能會導致自身 deadlock。 也可能與另一個正在查找 `..` 的 thread 發生死結。 如第八章中解釋的，解法是讓迴圈將目前的 directory inode 帶到下一輪，但只增加 reference count 而不加鎖
+而 `namex` 在每次迴圈結束時必須釋放該鎖，否則若 path 中包含 `.`（例如 `a/./b`），就可能會導致自身 deadlock。 也可能與另一個正在查找 `..` 的 thread 發生死結。 如第八章中解釋的，解法是讓迴圈將目前的 directory inode 帶到下一輪，但只增加引用計數而不加鎖
 
 有些資料項目在不同時期會受到不同機制的保護，有時甚至並非透過明確的 lock，而是透過 xv6 程式碼的結構隱含地避免了並發存取。 例如，當一個 physical page 處於 free 狀態時，它會受到 `kmem.lock` 的保護（[kernel/kalloc.c:24](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/kalloc.c#L24)）。 若該 page 被分配成一個 pipe（[kernel/pipe.c:23](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/pipe.c#L23)），它則會受到另一把 lock（`pi->lock`）的保護。 如果這個 page 被分配為某個新 process 的 user memory，那它甚至完全沒有受到任何 lock 保護，而是仰賴配置器的行為保證：只要 page 尚未被釋放，就不會分配給其他 process，因此也不會有並發使用的問題
 

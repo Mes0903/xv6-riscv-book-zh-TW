@@ -171,7 +171,7 @@ xv6 在許多地方使用了 lock 來避免 race condition。 就如前面提到
 
 由於 `sleep` 的實作方式（詳見第七章），xv6 中有許多長度為 2 的 lock-order chain，這涉及到每個 process 的 lock（也就是每個 `struct proc` 中的那把 lock）。 舉例來說，`consoleintr`（[kernel/console.c:136](https://github.com/mit-pdos/xv6-riscv/blob/riscv//kernel/console.c#L136)）是處理鍵盤輸入中斷的函式。 當接收到換行字元時，所有正在等待 console 輸入的 process 都應該被喚醒。 為了達成這點，`consoleintr` 會在持有 `cons.lock` 的情況下呼叫 `wakeup`，而 `wakeup` 在喚醒某個 process 時會取得該 process 的 lock
 
-因此，xv6 為了避免死結，規定全域的 lock 順序中必須先取得 `cons.lock`，然後才可以取得任何的 process lock。 而在檔案系統中，xv6 則有最長的 lock chain。 例如在建立檔案時，需要同時持有該目錄的 lock、新檔案 inode 的 lock、一個 disk block buffer 的 lock、磁碟驅動程式的 `vdisk_lock`，以及呼叫者的 `p->lock`。 為了避免死結，檔案系統程式碼必須依照前述順序來依次取得這些 lock
+因此，xv6 為了避免死結，規定全域的 lock 順序中必須先取得 `cons.lock`，然後才可以取得任何的 process lock。 而在檔案系統中，xv6 則有最長的 lock chain。 例如在建立檔案時，需要同時持有該目錄的 lock、新檔案 inode 的 lock、一個 disk block buffer 的 lock、硬碟驅動程式的 `vdisk_lock`，以及呼叫者的 `p->lock`。 為了避免死結，檔案系統程式碼必須依照前述順序來依次取得這些 lock
 
 要遵守全域的、避免死結的 lock 取得順序，其實比想像中困難。 某些時候，這樣的 lock 順序會與程式邏輯的結構衝突。 例如，某個模組 M1 呼叫另一個模組 M2，但 lock 的順序卻要求先取得 M2 的 lock，才能取得 M1 的 lock。 也有時候，在事前根本不知道下一把要取得的 lock 是哪一個，因為可能必須先持有某把 lock 才能知道下一個要鎖的是誰
 
@@ -283,7 +283,7 @@ xv6 提供了 sleep-lock 來滿足這個需求。 `acquiresleep`（[kernel/sleep
 
 大多數作業系統都支援 POSIX threads（Pthreads），這允許一個使用者行程能同時在多個 CPU 上執行數個執行緒。 Pthreads 提供了使用者層級的 lock、barrier 等功能。 Pthreads 也允許程式設計者指定某些 lock 是否要支援 re-entrant
 
-在使用者層級實作 Pthreads 需要作業系統的支援。 例如，如果一個 pthread 在某個 system call 中被 block，則同一個 process 中的其他 pthread 應該仍能在那顆 CPU 上繼續執行。 又例如，如果某個 pthread 改變了整個 process 的位址空間（像是對記憶體進行 map 或 unmap），kernel 必須讓所有在其他 CPU 上執行該 process 的執行緒也能更新它們的 page table hardware，以反映這個位址空間的改變
+在使用者層級實作 Pthreads 需要作業系統的支援。 例如，如果一個 pthread 在某個系統呼叫中被 block，則同一個 process 中的其他 pthread 應該仍能在那顆 CPU 上繼續執行。 又例如，如果某個 pthread 改變了整個 process 的位址空間（像是對記憶體進行 map 或 unmap），kernel 必須讓所有在其他 CPU 上執行該 process 的執行緒也能更新它們的 page table hardware，以反映這個位址空間的改變
 
 雖然可以在不使用 atomic instruction 的情況下實作 lock<sup>[[3]](#3)</sup>，但這樣的做法成本很高，因此大多數作業系統會選擇使用 atomic instruction 來實作 lock
 

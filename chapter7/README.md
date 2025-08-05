@@ -15,7 +15,7 @@ category:
 
 ## 7.1 Multiplexing
 
-xv6 的 multiplexing 機制會在兩種情況下讓某個 CPU 從一個 process 切換到另一個。 第一種是當 process 呼叫會阻塞（也就是需要等待某些事件才能繼續）的 system call 時，例如 `read`、`wait` 或 `sleep`，此時會透過 xv6 的 `sleep` 與 `wakeup` 機制來切換； 第二種是為了應對那些長時間運算而不會阻塞的 process，xv6 會定期強制讓 CPU 切換到其他 process。 前者稱為「自願切換（voluntary switches）」，後者則稱為「非自願切換（involuntary switches）」。 透過這些切換，xv6 創造出每個 process 各自擁有一顆 CPU 的錯覺
+xv6 的 multiplexing 機制會在兩種情況下讓某個 CPU 從一個 process 切換到另一個。 第一種是當 process 呼叫會阻塞（也就是需要等待某些事件才能繼續）的系統呼叫時，例如 `read`、`wait` 或 `sleep`，此時會透過 xv6 的 `sleep` 與 `wakeup` 機制來切換； 第二種是為了應對那些長時間運算而不會阻塞的 process，xv6 會定期強制讓 CPU 切換到其他 process。 前者稱為「自願切換（voluntary switches）」，後者則稱為「非自願切換（involuntary switches）」。 透過這些切換，xv6 創造出每個 process 各自擁有一顆 CPU 的錯覺
 
 要實作 multiplexing 有幾個挑戰：
 
@@ -26,7 +26,7 @@ xv6 的 multiplexing 機制會在兩種情況下讓某個 CPU 從一個 process 
 - 第三，由於所有 CPU 都會在同一組 process 間切換，因此必須設計一套鎖定策略以避免 race condition
 - 第四，當一個 process 結束時，它的記憶體與其他資源必須被釋放，但 process 自己無法完成這些釋放動作
   - 例如 process 無法在其還在使用 kernel stack 的情況下釋放那塊 stack，需要其他 thread 幫它收尾
-- 第五，對於多核機器，每顆 CPU 都必須記住自己目前正在執行哪個 process，這樣 system call 才能正確地作用在那個 process 的 kernel 狀態上
+- 第五，對於多核機器，每顆 CPU 都必須記住自己目前正在執行哪個 process，這樣系統呼叫才能正確地作用在那個 process 的 kernel 狀態上
 - 最後，`sleep` 和 `wakeup` 機制允許 process 放棄 CPU，並等待其他 process 或中斷將它喚醒，而這裡需要特別小心，避免 race condition 導致喚醒通知被遺失
 
 ## 7.2 Code: Context switching
@@ -724,7 +724,7 @@ semaphore 也經常被用來做同步。它的計數器通常代表像是 pipe b
 
 在 xv6 中終止 process 並清理其資源會引入相當多的複雜性。 在大多數作業系統中，這件事甚至更加複雜，因為被終止的 process 可能在 kernel 裡處於深層的 sleep 狀態，而要將它的 call stack 卸除時必須非常小心，因為 call stack 上的每個函數可能都需要做一些清理工作。 有些程式語言提供例外處理機制來協助這類清理，但 C 語言沒有
 
-此外，還有其他事件可能會導致一個正在 sleep 的 process 被喚醒，即使它等待的事件尚未發生。 例如，在 Unix 中，如果一個 process 處於 sleep 狀態，其他 process 可以向它送出 `signal`。 在這種情況下，該 process 會從被中斷的 system call 返回，並回傳 -1，同時將錯誤碼設為 `EINTR`。 應用程式可以根據這些值來決定後續處理方式。 而 xv6 不支援 signal，因此不會遇到這類複雜性
+此外，還有其他事件可能會導致一個正在 sleep 的 process 被喚醒，即使它等待的事件尚未發生。 例如，在 Unix 中，如果一個 process 處於 sleep 狀態，其他 process 可以向它送出 `signal`。 在這種情況下，該 process 會從被中斷的系統呼叫返回，並回傳 -1，同時將錯誤碼設為 `EINTR`。 應用程式可以根據這些值來決定後續處理方式。 而 xv6 不支援 signal，因此不會遇到這類複雜性
 
 xv6 中對於 `kill` 的支援並不完全令人滿意：有些 sleep loop 應該要檢查 `p->killed` 卻沒有檢查。 另一個相關的問題是，即便某些 sleep loop 會檢查 `p->killed`，仍然會遇到 `sleep` 與 `kill` 之間的競爭條件：`kill` 可能會在 victim 的 loop 檢查完 `p->killed`，但尚未呼叫 `sleep` 之前設下 `p->killed` 並試圖喚醒 victim。 如果發生這種情況，victim 將無法察覺 `p->killed`，直到它所等待的條件真的發生。 這可能會是很久以後，甚至永遠不會發生（例如如果 victim 在等待來自 console 的輸入，而使用者沒有打字）
 
@@ -739,7 +739,7 @@ xv6 中對於 `kill` 的支援並不完全令人滿意：有些 sleep loop 應�
 ## 7.11 Exercises
 
 1. 在不使用 `sleep` 與 `wakeup` 的前提下，在 xv6 中實作 `semaphore`（可以使用 spin lock）。 挑選幾個使用 `sleep` 與 `wakeup` 的地方，改用 semaphore 取代。並評估這樣做的結果
-2. 修正前面提到的 `kill` 與 `sleep` 之間的競爭問題，使得當 `kill` 發生在 victim 的 sleep loop 已經檢查過 `p->killed` 但尚未呼叫 `sleep` 之間時，victim 仍能放棄目前的 system call
+2. 修正前面提到的 `kill` 與 `sleep` 之間的競爭問題，使得當 `kill` 發生在 victim 的 sleep loop 已經檢查過 `p->killed` 但尚未呼叫 `sleep` 之間時，victim 仍能放棄目前的系統呼叫
 3. 設計一個機制，讓所有 sleep loop 都會檢查 `p->killed`。 例如，讓在 virtio driver 中的 process 被其他 process `kill` 時，能夠快速跳出 while loop
 4. 修改 xv6，使從一個 process 的 kernel thread 切換到另一個時，只需要一次 context switch，而不是透過 scheduler thread。 使讓出 CPU 的 thread 自行選出下一個要執行的 thread 並呼叫 `swtch`。 挑戰包括避免多顆 CPU 同時執行同一個 thread、處理鎖的正確性，以及避免 deadlock
 5. 修改 xv6 的 `scheduler`，當沒有任何 process 可執行時，使用 RISC-V 的 `WFI`（wait for interrupt）指令。 嘗試確保只要還有 process 處於 runnable 狀態，就不會有 CPU 還在執行 `WFI`
